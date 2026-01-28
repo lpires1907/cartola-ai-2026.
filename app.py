@@ -20,7 +20,7 @@ def get_bq_client():
     """
     try:
         # Pega o JSON que você salvou nos Secrets com aspas triplas
-        info_chave = json.loads(st.secrets["GCP_SERVICE_ACCOUNT"])
+        info_chave = st.secrets["GCP_SERVICE_ACCOUNT"]
         credentials = service_account.Credentials.from_service_account_info(info_chave)
         return bigquery.Client(credentials=credentials, project=info_chave['project_id'])
     except Exception as e:
