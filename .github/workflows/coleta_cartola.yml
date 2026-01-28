@@ -1,0 +1,37 @@
+name: Automação Cartola BigQuery
+
+on:
+  schedule:
+    # Roda a cada 1 hora (no minuto 0)
+    # Ex: 10:00, 11:00, 12:00...
+    - cron: '0 * * * *'
+  
+  # Permite rodar manualmente clicando no botão "Run workflow"
+  workflow_dispatch:
+
+jobs:
+  coleta_e_ia:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout do Código
+        uses: actions/checkout@v3
+
+      - name: 🐍 Configurar Python 3.10
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: 📦 Instalar Dependências
+        run: |
+          python -m pip install --upgrade pip
+          # Instala bibliotecas para API, BigQuery e IA
+          pip install requests pandas google-generativeai google-cloud-bigquery db-dtypes pytz
+
+      - name: 🚀 Executar Coletor
+        env:
+          # Mapeando os Secrets do GitHub para o Python
+          CARTOLA_BEARER_TOKEN: ${{ secrets.CARTOLA_BEARER_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+        run: python coletor.py
