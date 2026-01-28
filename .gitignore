@@ -1,0 +1,11 @@
+secrets.json
+key
+key.pub
+*.pem
+*.p8
+.env
+__pycache__/
+*.pyc
+.streamlit/
+.venv/
+venv/
