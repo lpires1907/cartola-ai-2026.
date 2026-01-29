@@ -2,15 +2,14 @@ import os
 import json
 import requests
 import pandas as pd
-import google.generativeai as genai
+from google import genai
 from google.cloud import bigquery
 from google.oauth2 import service_account
 from datetime import datetime
 import pytz
 
 # --- CONFIGURAÇÕES GERAIS ---
-# Mude aqui para o slug da sua liga
-LIGA_SLUG = "nome-da-sua-liga"
+LIGA_SLUG = "sas-brasil-2026" # <--- JÁ PREENCHIDO COM SEU NOME
 
 # Variáveis de Ambiente
 BEARER_TOKEN = os.getenv('CARTOLA_BEARER_TOKEN')
@@ -30,7 +29,7 @@ def get_bq_client():
     credentials = service_account.Credentials.from_service_account_info(info_chave)
     return bigquery.Client(credentials=credentials, project=info_chave['project_id'])
 
-def garantir_tabelas(client):
+def garantir_dataset(client):
     dataset_ref = f"{client.project}.{DATASET_ID}"
     dataset = bigquery.Dataset(dataset_ref)
     dataset.location = "US"
@@ -40,41 +39,32 @@ def garantir_tabelas(client):
     except Exception as e:
         print(f"Aviso dataset: {e}")
 
-def salvar_bigquery(client, df, tabela_nome):
+def salvar_bigquery(client, df, tabela_nome, schema=None):
+    """
+    Função genérica para salvar qualquer DataFrame no BigQuery.
+    """
     table_id = f"{client.project}.{tabela_nome}"
-    # Schema forçado para garantir que 'pontos' seja FLOAT
+    
     job_config = bigquery.LoadJobConfig(
         write_disposition="WRITE_APPEND",
-        schema=[
-            bigquery.SchemaField("nome", "STRING"),
-            bigquery.SchemaField("nome_cartola", "STRING"),
-            bigquery.SchemaField("pontos", "FLOAT"),
-            bigquery.SchemaField("patrimonio", "FLOAT"),
-            bigquery.SchemaField("timestamp", "TIMESTAMP"),
-        ]
+        schema=schema 
     )
+    
     try:
+        # Usa pandas_gbq indiretamente via cliente oficial
         job = client.load_table_from_dataframe(df, table_id, job_config=job_config)
         job.result()
         print(f"✅ Sucesso: Dados salvos em {tabela_nome}")
     except Exception as e:
-        print(f"❌ Erro BigQuery: {e}")
+        print(f"❌ Erro BigQuery ({tabela_nome}): {e}")
 
-# --- TRATAMENTO DE DADOS (A CORREÇÃO ESTÁ AQUI) ---
+# --- TRATAMENTO DE DADOS ---
 def extrair_pontuacao(dado_pontos):
-    """
-    Função para lidar com a bagunça da API.
-    Se vier um número, usa o número.
-    Se vier um dicionário {'rodada': None...}, tenta pegar o campeonato ou retorna 0.0.
-    """
+    """Lida com a estrutura complexa ou nula da pontuação"""
     if isinstance(dado_pontos, (int, float)):
         return float(dado_pontos)
-    
     if isinstance(dado_pontos, dict):
-        # Tenta pegar a pontuação do campeonato, se for None, vira 0.0
         return float(dado_pontos.get('campeonato') or 0.0)
-    
-    # Se for None ou qualquer outra coisa
     return 0.0
 
 # --- COLETA ---
@@ -86,10 +76,9 @@ def coletar_dados():
         'x-glb-auth': 'oidc',
         'x-glb-app': 'cartola_web',
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Accept': 'application/json'
     }
     
-    print(f"🔍 Buscando dados da liga...")
+    print(f"🔍 Buscando dados da liga: {LIGA_SLUG}...")
     res = requests.get(url, headers=headers)
     
     if res.status_code == 200:
@@ -98,34 +87,44 @@ def coletar_dados():
         print(f"❌ Erro API Cartola ({res.status_code}): {res.text}")
         return None
 
-# --- IA (GEMINI) ---
+# --- IA (NOVA BIBLIOTECA GOOGLE GENAI) ---
 def gerar_analise_ia(df_ranking):
     if not GEMINI_KEY:
-        return "IA indisponível (Chave não configurada)."
+        print("Chave Gemini não encontrada.")
+        return "IA indisponível."
         
     try:
-        genai.configure(api_key=GEMINI_KEY)
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        # Nova Inicialização do Cliente (v2)
+        client = genai.Client(api_key=GEMINI_KEY)
         
         lider = df_ranking.iloc[0]['nome']
+        vice_lider = df_ranking.iloc[1]['nome']
+        vice_lanterna = df_ranking.iloc[-2]['nome']
         lanterna = df_ranking.iloc[-1]['nome']
         pontos_lider = df_ranking.iloc[0]['pontos']
         
         prompt = f"""
-        Você é um narrador esportivo brasileiro muito sarcástico.
-        Resuma a rodada desta liga de Cartola:
-        - Líder: {lider} ({pontos_lider} pts).
+        Você é um narrador esportivo brasileiro sarcástico (estilo "Corneteiro").
+        Resuma a situação atual da liga Cartola FC "{LIGA_SLUG}":
+        - Líder: {lider} com {pontos_lider} pontos.
+        - Vice-Líder: {vice_lider}.
+        - Vice-Lanterna: {vice_lanterna}.
         - Lanterna: {lanterna}.
         
-        Faça uma piada curta (max 200 caracteres) elogiando a sorte do líder e zoando o lanterna.
+        Faça um comentário ácido e engraçado de no máximo 200 caracteres elogiando (ou dizendo que é sorte) o líder e zoando o lanterna.
         """
-        response = model.generate_content(prompt)
+        
+        # Chamada atualizada para o modelo Flash 2.0
+        response = client.models.generate_content(
+            model='gemini-2.0-flash', 
+            contents=prompt
+        )
         return response.text
     except Exception as e:
-        print(f"Erro Gemini: {e}")
-        return "A IA foi para o departamento médico."
+        print(f"❌ Erro na API Gemini: {e}")
+        return "O narrador foi demitido (Erro técnico)."
 
-# --- MAIN ---
+# --- FLUXO PRINCIPAL ---
 def main():
     if not BEARER_TOKEN:
         print("⛔ ERRO: Secret CARTOLA_BEARER_TOKEN não encontrada.")
@@ -136,42 +135,60 @@ def main():
 
     times = dados.get('times', [])
     if not times:
-        print("Nenhum time encontrado.")
+        print("Nenhum time encontrado. Verifique o Token ou o Slug da Liga.")
         return
 
-    # Preparar Dados COM TRATAMENTO
     ts_agora = datetime.now(pytz.timezone('America/Sao_Paulo'))
     
+    # 1. TRATAMENTO DOS DADOS (TABELA HISTÓRICO)
     lista_limpa = []
     for time in times:
-        # Aqui aplicamos a correção para extrair o número real
-        pontos_reais = extrair_pontuacao(time.get('pontos'))
-        patrimonio_real = float(time.get('patrimonio', 100))
-        
         lista_limpa.append({
-            'nome': time['nome'],
-            'nome_cartola': time['nome_cartola'],
-            'pontos': pontos_reais,
-            'patrimonio': patrimonio_real,
+            'nome': str(time['nome']),
+            'nome_cartola': str(time['nome_cartola']),
+            'pontos': extrair_pontuacao(time.get('pontos')),
+            'patrimonio': float(time.get('patrimonio', 100)),
             'timestamp': ts_agora
         })
 
-    # Cria o DataFrame já limpo e numérico
-    df = pd.DataFrame(lista_limpa)
+    df_historico = pd.DataFrame(lista_limpa)
+    
+    # Definição do Schema para Histórico (Evita erro de tipos)
+    schema_historico = [
+        bigquery.SchemaField("nome", "STRING"),
+        bigquery.SchemaField("nome_cartola", "STRING"),
+        bigquery.SchemaField("pontos", "FLOAT"),
+        bigquery.SchemaField("patrimonio", "FLOAT"),
+        bigquery.SchemaField("timestamp", "TIMESTAMP"),
+    ]
 
     client = get_bq_client()
-    garantir_tabelas(client)
+    garantir_dataset(client)
     
-    # 1. Salvar Histórico
-    salvar_bigquery(client, df, TABELA_HISTORICO)
+    # Salva Tabela de Times
+    salvar_bigquery(client, df_historico, TABELA_HISTORICO, schema_historico)
     
-    # 2. Gerar Corneta
-    ranking = df.sort_values(by='pontos', ascending=False)
-    texto = gerar_analise_ia(ranking)
-    df_corneta = pd.DataFrame([{'texto': texto, 'data': ts_agora}])
-    salvar_bigquery(client, df_corneta, TABELA_CORNETA)
+    # 2. GERAÇÃO DA IA (TABELA CORNETA)
+    ranking = df_historico.sort_values(by='pontos', ascending=False)
     
-    print("\n🚀 Processo finalizado com sucesso!")
+    print("🤖 Gerando comentário com Gemini 2.0 Flash...")
+    texto_ia = gerar_analise_ia(ranking)
+    
+    df_corneta = pd.DataFrame([{
+        'texto': str(texto_ia), 
+        'data': ts_agora
+    }])
+    
+    # Definição do Schema para Corneta
+    schema_corneta = [
+        bigquery.SchemaField("texto", "STRING"),
+        bigquery.SchemaField("data", "TIMESTAMP"),
+    ]
+    
+    # Salva Tabela de Comentários
+    salvar_bigquery(client, df_corneta, TABELA_CORNETA, schema_corneta)
+    
+    print("\n🚀 Automação concluída!")
 
 if __name__ == "__main__":
     main()
