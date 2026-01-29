@@ -1,8 +1,8 @@
 streamlit
-pandas
 requests
+pandas
+pandas-gbq
+google-genai
 google-cloud-bigquery
-google-auth
-google-generativeai
 db-dtypes
-pyarrow
+pytz
