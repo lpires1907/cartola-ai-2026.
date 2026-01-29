@@ -9,7 +9,8 @@ from datetime import datetime
 import pytz
 
 # --- CONFIGURAÇÕES GERAIS ---
-LIGA_SLUG = "sas-brasil-2026" # <--- JÁ PREENCHIDO COM SEU NOME
+# Mude aqui para o slug da sua liga
+LIGA_SLUG = "sas-brasil-2026"
 
 # Variáveis de Ambiente
 BEARER_TOKEN = os.getenv('CARTOLA_BEARER_TOKEN')
