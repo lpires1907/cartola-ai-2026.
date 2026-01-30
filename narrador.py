@@ -13,118 +13,161 @@ GCP_JSON = os.getenv('GCP_SERVICE_ACCOUNT')
 DATASET_ID = "cartola_analytics"
 TAB_HISTORICO = f"{DATASET_ID}.historico"
 TAB_CORNETA = f"{DATASET_ID}.comentarios_ia"
+VIEW_CONSOLIDADA = f"{DATASET_ID}.view_consolidada_times"
 
 def get_bq_client():
     info = json.loads(GCP_JSON)
     creds = service_account.Credentials.from_service_account_info(info)
     return bigquery.Client(credentials=creds, project=info['project_id'])
 
-def ja_comentou_rodada_fechada(client, rodada):
-    """Verifica se já existe comentário para esta rodada oficial"""
+# --- CHECAGENS DE REDUNDÂNCIA ---
+def ja_comentou(client, rodada, tipo):
+    """Verifica se já existe comentário desse TIPO para esta rodada"""
     try:
+        # Verifica se a coluna 'tipo' existe antes de filtrar
+        schema = client.get_table(f"{client.project}.{TAB_CORNETA}").schema
+        tem_coluna_tipo = any(field.name == 'tipo' for field in schema)
+        
+        if not tem_coluna_tipo: return False # Se não tem coluna, força gerar novo para atualizar schema
+
         query = f"""
             SELECT COUNT(*) as qtd FROM `{client.project}.{TAB_CORNETA}` 
-            WHERE rodada = {rodada} 
-            AND (texto NOT LIKE '%pré-temporada%' AND texto NOT LIKE '%AO VIVO%')
+            WHERE rodada = {rodada} AND tipo = '{tipo}'
         """
         res = list(client.query(query).result())
         return res[0].qtd > 0
     except: return False
 
-def gerar_analise_gemini(df_ranking, rodada, status_rodada):
+# --- FUNÇÕES DE GERAÇÃO (IA) ---
+def chamar_gemini(prompt):
     if not GEMINI_KEY: return "IA sem contrato."
-
-    qtd = len(df_ranking)
-    lider = df_ranking.iloc[0]
-    lanterna = df_ranking.iloc[-1]
-    
-    vice_lider = df_ranking.iloc[1] if qtd >= 2 else None
-    vice_lanterna = df_ranking.iloc[-2] if qtd >= 3 else None
-    
-    txt_status = "AO VIVO (Parcial)" if status_rodada == 'PARCIAL' else "FINALIZADA"
-
-    prompt = f"""
-    Você é um comentarista de futebol e Fantasy Game (Cartola FC) sarcástico e ácido.
-    Analise a RODADA {rodada} ({txt_status}) da liga.
-
-    DADOS:
-    1. 🥇 LÍDER: {lider['nome']} fez {lider['pontos']:.1f} pts (Patrimônio: C$ {lider.get('patrimonio', 100):.1f}).
-    {f"2. 🥈 VICE-LÍDER: {vice_lider['nome']} fez {vice_lider['pontos']:.1f} pts (Está na cola!)." if vice_lider is not None else ""}
-    
-    ... (meio da tabela) ...
-
-    {f"3. 🥉 VICE-LANTERNA: {vice_lanterna['nome']} fez {vice_lanterna['pontos']:.1f} pts (Por pouco!)." if vice_lanterna is not None else ""}
-    4. 🐌 LANTERNA: {lanterna['nome']} fez {lanterna['pontos']:.1f} pts (Patrimônio: C$ {lanterna.get('patrimonio', 100):.1f}).
-
-    MISSÃO:
-    Escreva um parágrafo curto (max 400 caracteres) zoando o lanterna e o vice-lanterna, e alertando o líder que o vice está chegando (ou elogiando a sorte do líder).
-    Use emojis. Se for rodada AO VIVO, diga que "ainda tem jogo". Se for FINALIZADA, decrete o resultado.
-    """
-
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}"
-    
-    payload = {"contents": [{"parts": [{"text": prompt}]}]}
-    headers = {'Content-Type': 'application/json'}
-    
     try:
-        res = requests.post(url, headers=headers, json=payload)
+        res = requests.post(url, headers={'Content-Type': 'application/json'}, json={"contents": [{"parts": [{"text": prompt}]}]})
         if res.status_code == 200:
             return res.json()['candidates'][0]['content']['parts'][0]['text']
-        else:
-            return f"Erro IA: {res.status_code}"
     except Exception as e:
-        return f"Erro Narrador: {e}"
+        print(f"Erro Gemini: {e}")
+    return None
 
+def gerar_analise_rodada(df_ranking, rodada, status_rodada):
+    lider = df_ranking.iloc[0]
+    lanterna = df_ranking.iloc[-1]
+    vice = df_ranking.iloc[1] if len(df_ranking) > 1 else None
+    
+    txt_status = "AO VIVO" if status_rodada == 'PARCIAL' else "FINALIZADA"
+    
+    prompt = f"""
+    Atue como um narrador de futebol sarcástico. Rodada {rodada} ({txt_status}).
+    - Destaque: {lider['nome']} ({lider['pontos']} pts).
+    - Zueira: {lanterna['nome']} ({lanterna['pontos']} pts).
+    {f"- Alerta: {vice['nome']} está na cola!" if vice is not None else ""}
+    Faça um comentário curto (max 280 chars) e engraçado.
+    """
+    return chamar_gemini(prompt)
+
+def gerar_analise_geral(df_view, rodada_atual):
+    # Pega dados estatísticos da View
+    lider_geral = df_view.iloc[0]
+    maior_media = df_view.sort_values('media_pontos', ascending=False).iloc[0]
+    maior_pico = df_view.sort_values('maior_pontuacao', ascending=False).iloc[0]
+    regular = df_view.sort_values('mediana_pontos', ascending=False).iloc[0]
+    
+    total_rodadas = 38
+    rodadas_restantes = total_rodadas - rodada_atual
+    
+    prompt = f"""
+    Atue como um Analista de Dados Esportivos sério, mas com pitadas de humor.
+    Analise o CAMPEONATO GERAL até a Rodada {rodada_atual} de {total_rodadas}.
+    
+    DADOS CONSOLIDADOS:
+    1. Líder Geral: {lider_geral['nome']} (Total: {lider_geral['total_geral']:.1f}).
+    2. Maior Média: {maior_media['nome']} ({maior_media['media_pontos']:.1f}/rodada).
+    3. Time mais Regular (Mediana): {regular['nome']}.
+    4. Maior "Mitada" (Máx): {maior_pico['nome']} ({maior_pico['maior_pontuacao']:.1f} pts numa só rodada).
+    
+    CONTEXTO:
+    Faltam {rodadas_restantes} rodadas.
+    
+    MISSÃO:
+    Escreva um parágrafo de análise (max 500 chars).
+    Compare a constância (média/mediana) com a sorte (pico).
+    Diga se o campeonato está aberto ou se o líder está disparando.
+    """
+    return chamar_gemini(prompt)
+
+# --- MAIN ---
 def main():
     if not GCP_JSON: print("Erro: Sem credenciais GCP"); return
     client = get_bq_client()
+    ts_agora = datetime.now(pytz.timezone('America/Sao_Paulo'))
 
-    # 1. Pega os dados mais recentes do banco
-    query = f"""
-        SELECT * FROM `{client.project}.{TAB_HISTORICO}`
-        WHERE timestamp = (SELECT MAX(timestamp) FROM `{client.project}.{TAB_HISTORICO}`)
-        ORDER BY pontos DESC
-    """
-    df_ranking = client.query(query).to_dataframe()
+    # 1. Obter Rodada Atual e Status
+    try:
+        query_meta = f"SELECT rodada, tipo_dado FROM `{client.project}.{TAB_HISTORICO}` ORDER BY timestamp DESC LIMIT 1"
+        df_meta = client.query(query_meta).to_dataframe()
+        if df_meta.empty: print("Sem dados."); return
+        
+        rodada_atual = int(df_meta['rodada'].iloc[0])
+        status_dados = df_meta['tipo_dado'].iloc[0]
+    except: print("Erro ao ler metadados."); return
 
-    if df_ranking.empty:
-        print("📭 Nenhum dado no histórico para comentar.")
-        return
+    print(f"🎤 Iniciando Narrador | Rodada {rodada_atual} ({status_dados})")
 
-    # --- CORREÇÃO DO ERRO AQUI ---
-    rodada_banco = int(df_ranking.iloc[0]['rodada'])
-    
-    # Verifica se a coluna existe. Se não existir (dados antigos), assume OFICIAL.
-    if 'tipo_dado' in df_ranking.columns:
-        tipo_dado = df_ranking.iloc[0]['tipo_dado']
+    # --- BLOCO 1: COMENTÁRIO DA RODADA (MICRO) ---
+    if not ja_comentou(client, rodada_atual, 'RODADA'):
+        print("⚡ Gerando análise da RODADA...")
+        query_round = f"SELECT * FROM `{client.project}.{TAB_HISTORICO}` WHERE rodada = {rodada_atual} ORDER BY pontos DESC"
+        df_round = client.query(query_round).to_dataframe()
+        
+        texto_rodada = gerar_analise_rodada(df_round, rodada_atual, status_dados)
+        
+        if texto_rodada:
+            salvar_comentario(client, texto_rodada, rodada_atual, 'RODADA', ts_agora)
     else:
-        tipo_dado = 'OFICIAL' 
-    # -----------------------------
+        print("zzz Análise de RODADA já feita.")
 
-    print(f"🎤 Preparando narração para Rodada {rodada_banco} ({tipo_dado})...")
+    # --- BLOCO 2: COMENTÁRIO GERAL (MACRO) ---
+    # Só gera análise geral se for dados OFICIAIS (fechados), para não oscilar com parciais
+    if status_dados == 'OFICIAL' and not ja_comentou(client, rodada_atual, 'GERAL'):
+        print("🧠 Gerando análise GERAL (Estatística)...")
+        query_view = f"SELECT * FROM `{client.project}.{VIEW_CONSOLIDADA}` ORDER BY total_geral DESC"
+        df_view = client.query(query_view).to_dataframe()
+        
+        texto_geral = gerar_analise_geral(df_view, rodada_atual)
+        
+        if texto_geral:
+            salvar_comentario(client, texto_geral, rodada_atual, 'GERAL', ts_agora)
+    else:
+        print("zzz Análise GERAL já feita ou dados ainda são parciais.")
 
-    # 2. Check de redundância
-    if tipo_dado == 'OFICIAL' and ja_comentou_rodada_fechada(client, rodada_banco):
-        print("🤐 Rodada oficial já comentada anteriormente. Narrador em silêncio.")
-        return
-
-    # 3. Gera o comentário
-    texto = gerar_analise_gemini(df_ranking, rodada_banco, tipo_dado)
-    print(f"🗣️ Comentário gerado: {texto}")
-
-    # 4. Salva
-    df_save = pd.DataFrame([{
+def salvar_comentario(client, texto, rodada, tipo, ts):
+    df = pd.DataFrame([{
         'texto': texto,
-        'rodada': rodada_banco,
-        'data': datetime.now(pytz.timezone('America/Sao_Paulo'))
+        'rodada': rodada,
+        'tipo': tipo,  # <--- NOVA COLUNA
+        'data': ts
     }])
     
-    # Salva no BQ
-    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND", schema=[
-        bigquery.SchemaField("texto", "STRING"), bigquery.SchemaField("rodada", "INTEGER"), bigquery.SchemaField("data", "TIMESTAMP")
-    ])
-    client.load_table_from_dataframe(df_save, f"{client.project}.{TAB_CORNETA}", job_config=job_config).result()
-    print("💾 Comentário salvo com sucesso!")
+    # Schema com a nova coluna 'tipo'
+    schema = [
+        bigquery.SchemaField("texto", "STRING"),
+        bigquery.SchemaField("rodada", "INTEGER"),
+        bigquery.SchemaField("tipo", "STRING"), # <--- Adicionado
+        bigquery.SchemaField("data", "TIMESTAMP")
+    ]
+    
+    job_config = bigquery.LoadJobConfig(
+        write_disposition="WRITE_APPEND",
+        schema_update_options=[bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION],
+        schema=schema
+    )
+    
+    try:
+        client.load_table_from_dataframe(df, f"{client.project}.{TAB_CORNETA}", job_config=job_config).result()
+        print(f"💾 Comentário ({tipo}) salvo!")
+    except Exception as e:
+        print(f"❌ Erro ao salvar: {e}")
 
 if __name__ == "__main__":
     main()
