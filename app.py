@@ -2,146 +2,170 @@ import streamlit as st
 import pandas as pd
 from google.cloud import bigquery
 from google.oauth2 import service_account
-import json
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(
-    page_title="Cartola AI 2026", 
-    layout="wide", 
+    page_title="Cartola Analytics 2026",
+    layout="wide",
     page_icon="⚽",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="expanded"
 )
 
-# --- FUNÇÃO DE CONEXÃO (BIGQUERY) ---
+# --- ESTILOS CSS ---
+st.markdown("""
+    <style>
+    .big-font { font-size:20px !important; }
+    .stMetric { background-color: #f0f2f6; padding: 10px; border-radius: 5px; }
+    </style>
+""", unsafe_allow_html=True)
+
+# --- CONEXÃO BIGQUERY ---
 @st.cache_resource
 def get_bq_client():
-    """
-    Conecta ao BigQuery usando as credenciais salvas nos Secrets do Streamlit Cloud.
-    """
     try:
-        # Pega o JSON que você salvou nos Secrets com aspas triplas
-        info_chave = st.secrets["GCP_SERVICE_ACCOUNT"]
-        credentials = service_account.Credentials.from_service_account_info(info_chave)
-        return bigquery.Client(credentials=credentials, project=info_chave['project_id'])
+        info = st.secrets["GCP_SERVICE_ACCOUNT"]
+        creds = service_account.Credentials.from_service_account_info(info)
+        return bigquery.Client(credentials=creds, project=info['project_id'])
     except Exception as e:
-        st.error(f"Erro ao conectar no Google Cloud: {e}")
+        st.error(f"Erro de Conexão: {e}")
         return None
 
-# --- CARREGAMENTO DOS DADOS ---
-@st.cache_data(ttl=600) # Atualiza os dados a cada 10 minutos
-def carregar_dados():
+# --- CARREGAR DADOS ---
+@st.cache_data(ttl=300) # Cache de 5 minutos
+def carregar_dados_gerais():
     client = get_bq_client()
-    if not client:
-        return pd.DataFrame(), pd.DataFrame()
+    if not client: return None, None, None
 
-    # Define o caminho da tabela (Projeto.Dataset)
     project_id = client.project
-    dataset_id = "cartola_analytics" 
+    dataset = "cartola_analytics"
 
     try:
-        # 1. Busca todo o histórico de pontos
-        query_hist = f"""
-            SELECT * FROM `{project_id}.{dataset_id}.historico` 
-            ORDER BY timestamp ASC
+        # 1. RANKING ATUAL (Pega a última rodada disponível)
+        query_rank = f"""
+            SELECT * FROM `{project_id}.{dataset}.historico`
+            WHERE rodada = (SELECT MAX(rodada) FROM `{project_id}.{dataset}.historico`)
+            ORDER BY pontos DESC
         """
-        df_hist = client.query(query_hist).to_dataframe()
+        df_rank = client.query(query_rank).to_dataframe()
 
-        # 2. Busca apenas o comentário mais recente da IA
-        query_corneta = f"""
-            SELECT * FROM `{project_id}.{dataset_id}.comentarios_ia` 
+        # 2. ESCALAÇÕES (Pega dados da última rodada)
+        query_esc = f"""
+            SELECT * FROM `{project_id}.{dataset}.times_escalacoes`
+            WHERE rodada = (SELECT MAX(rodada) FROM `{project_id}.{dataset}.times_escalacoes`)
+        """
+        df_esc = client.query(query_esc).to_dataframe()
+
+        # 3. CORNETA IA (Último comentário)
+        query_ia = f"""
+            SELECT * FROM `{project_id}.{dataset}.comentarios_ia`
             ORDER BY data DESC LIMIT 1
         """
-        df_corneta = client.query(query_corneta).to_dataframe()
-        
-        return df_hist, df_corneta
-        
+        df_ia = client.query(query_ia).to_dataframe()
+
+        return df_rank, df_esc, df_ia
+
     except Exception as e:
-        # Esse erro acontece se o GitHub Action ainda não tiver rodado a primeira vez
-        return pd.DataFrame(), pd.DataFrame()
+        # Retorna None para tratarmos o erro na interface sem crashar
+        return None, None, None
 
-# --- INTERFACE DO DASHBOARD ---
-st.title("⚽ Cartola AI - Monitoramento da Liga")
-st.caption("Dados atualizados automaticamente via GitHub Actions + BigQuery")
+# --- INTERFACE ---
+st.title("⚽ Cartola Analytics 2026")
 
-df_hist, df_corneta = carregar_dados()
+df_rank, df_esc, df_ia = carregar_dados_gerais()
 
-if not df_hist.empty:
+# VERIFICAÇÃO DE DADOS VAZIOS
+if df_rank is None or df_rank.empty:
+    st.warning("⚠️ O Banco de Dados parece estar vazio ou inacessível.")
+    st.info("💡 **Dica:** Se você acabou de resetar o banco, aguarde a execução do 'Coletor' no GitHub Actions.")
     
-    # === SEÇÃO 1: A CORNETA DA IA ===
-    if not df_corneta.empty:
-        texto_ia = df_corneta['texto'].iloc[0]
-        st.info(f"🤖 **O Especialista diz:** {texto_ia}")
+    if st.button("🔄 Tentar Recarregar"):
+        st.cache_data.clear()
+        st.rerun()
+    st.stop() # Para a execução aqui se não tiver dados
 
-    st.divider()
+# --- DADOS CARREGADOS COM SUCESSO ---
 
-    # === SEÇÃO 2: MÉTRICAS (KPIs) ===
-    # Filtra apenas a última coleta de dados baseada no tempo
-    ultimo_ts = df_hist['timestamp'].max()
-    ranking_atual = df_hist[df_hist['timestamp'] == ultimo_ts].sort_values(by='pontos', ascending=False)
+# Recupera infos da rodada atual
+rodada_atual = df_rank['rodada'].iloc[0]
+status_dados = df_rank['tipo_dado'].iloc[0] # OFICIAL ou PARCIAL
+status_cor = "🟢" if status_dados == "OFICIAL" else "🔴"
+
+st.caption(f"📅 Dados da **Rodada {rodada_atual}** • Status: {status_cor} **{status_dados}**")
+
+# --- ÁREA DA IA (CORNETA) ---
+if not df_ia.empty:
+    with st.chat_message("assistant", avatar="🤖"):
+        st.write(f"**Comentário do Especialista:** {df_ia['texto'].iloc[0]}")
+
+st.divider()
+
+# --- ABAS DE CONTEÚDO ---
+tab1, tab2, tab3 = st.tabs(["🏆 Classificação", "👕 Escalações", "📊 Estatísticas"])
+
+# === ABA 1: CLASSIFICAÇÃO ===
+with tab1:
+    col1, col2 = st.columns([2, 1])
     
-    lider = ranking_atual.iloc[0]
-    vice_lider = ranking_atual.iloc[1]
-    vice_lanterna = ranking_atual.iloc[-2]
-    lanterna = ranking_atual.iloc[-1]
-    
-    col1, col2, col3, col4, col5 = st.columns(5)
-    
-    col1.metric("🥇 Líder", lider['nome'], f"{lider['pontos']:.1f} pts")
-    col2.metric("🥈 Vice-Líder", vice_lider['nome'], f"{vice_lider['pontos']:.1f} pts")
-    col3.metric("📅 Atualizado em", ultimo_ts.strftime('%d/%m às %H:%M'))
-    col4.metric("🥉 Vice-Lanterna", vice_lanterna['nome'], f"{vice_lanterna['pontos']:.1f} pts")
-    col5.metric("🐌 Lanterna", lanterna['nome'], f"{lanterna['pontos']:.1f} pts")
-
-    st.divider()
-
-    # === SEÇÃO 3: GRÁFICOS E TABELAS ===
-    tab_grafico, tab_tabela, tab_filtro = st.tabs(["📈 Evolução da Rodada", "📋 Tabela Completa", "📊 Filtro por Rodada"])
-
-    with tab_grafico:
-        st.subheader("Quem está subindo e quem está descendo?")
-        # Transforma os dados: Linha do tempo no eixo X, Times nas linhas coloridas
-        df_pivot = df_hist.pivot(index='timestamp', columns='nome', values='pontos')
-        st.line_chart(df_pivot)
-
-    with tab_tabela:
-        st.subheader("Classificação Detalhada")
-        # Mostra a tabela bonita, escondendo o índice numérico feio
+    with col1:
+        st.subheader("Tabela da Liga")
+        
+        # Prepara tabela bonita
+        df_display = df_rank[['nome', 'pontos', 'patrimonio', 'nome_cartola']].copy()
+        df_display = df_display.reset_index(drop=True)
+        df_display.index += 1 # Começar ranking do 1
+        
         st.dataframe(
-            ranking_atual[['nome', 'nome_cartola', 'pontos', 'patrimonio']], 
-            use_container_width=True, 
+            df_display,
+            column_config={
+                "nome": "Time",
+                "pontos": st.column_config.NumberColumn("Pontos", format="%.1f"),
+                "patrimonio": st.column_config.NumberColumn("C$ Patrimônio", format="C$ %.2f"),
+                "nome_cartola": "Cartoleiro"
+            },
+            use_container_width=True
+        )
+
+    with col2:
+        st.subheader("Destaques")
+        lider = df_rank.iloc[0]
+        lanterna = df_rank.iloc[-1]
+        
+        st.metric("🥇 Líder", lider['nome'], f"{lider['pontos']:.1f} pts")
+        st.metric("💰 Mais Rico", 
+                  df_rank.sort_values('patrimonio', ascending=False).iloc[0]['nome'],
+                  f"C$ {df_rank['patrimonio'].max():.2f}")
+        st.metric("🐌 Lanterna", lanterna['nome'], f"{lanterna['pontos']:.1f} pts")
+
+# === ABA 2: ESCALAÇÕES ===
+with tab2:
+    st.subheader("Raio-X dos Times")
+    
+    if df_esc is not None and not df_esc.empty:
+        times_disponiveis = sorted(df_esc['liga_time_nome'].unique())
+        time_selecionado = st.selectbox("Selecione um time para ver a escalação:", times_disponiveis)
+        
+        # Filtra escalação do time
+        df_time = df_esc[df_esc['liga_time_nome'] == time_selecionado].sort_values(by='pontos', ascending=False)
+        
+        # Exibe escalação
+        st.dataframe(
+            df_time[['atleta_posicao', 'atleta_apelido', 'atleta_clube', 'pontos']],
+            column_config={
+                "atleta_posicao": "Posição",
+                "atleta_apelido": "Jogador",
+                "atleta_clube": "Clube Real",
+                "pontos": st.column_config.NumberColumn("Pontos", format="%.1f")
+            },
+            use_container_width=True,
             hide_index=True
         )
-    
-    with tab_filtro:
-        st.subheader("Pontuações por Rodada")
         
-        # Obter lista de timestamps (rodadas)
-        rodadas = sorted(df_hist['timestamp'].unique(), reverse=True)
-        
-        # Selector de rodada
-        rodada_selecionada = st.selectbox(
-            "Selecione a rodada:",
-            rodadas,
-            format_func=lambda x: x.strftime('%d/%m/%Y às %H:%M')
-        )
-        
-        # Filtrar dados da rodada selecionada
-        df_rodada = df_hist[df_hist['timestamp'] == rodada_selecionada].sort_values(by='pontos', ascending=False)
-        
-        # Exibir tabela com coluna de posição
-        df_rodada_exibir = df_rodada[['nome', 'nome_cartola', 'pontos', 'patrimonio']].reset_index(drop=True)
-        df_rodada_exibir.index = df_rodada_exibir.index + 1
-        df_rodada_exibir.index.name = 'Posição'
-        
-        st.dataframe(df_rodada_exibir, use_container_width=True)
+        total_time = df_time['pontos'].sum()
+        st.metric(f"Total {time_selecionado}", f"{total_time:.1f} pts")
+    else:
+        st.info("Nenhuma escalação detalhada encontrada para esta rodada.")
 
-else:
-    # Mensagem de espera caso o banco esteja vazio
-    st.warning("⚠️ Ainda não há dados disponíveis.")
-    st.markdown("""
-    **O que fazer:**
-    1. Verifique se o seu **GitHub Action** rodou com sucesso (deu "Verde").
-    2. Se rodou agora, aguarde uns instantes e clique no botão abaixo.
-    """)
-    if st.button("🔄 Tentar Recarregar"):
-        st.rerun()
+# === ABA 3: ESTATÍSTICAS ===
+with tab3:
+    st.subheader("Comparação de Patrimônio")
+    st.bar_chart(df_rank.set_index('nome')['patrimonio'])
