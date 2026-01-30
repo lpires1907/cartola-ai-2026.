@@ -21,12 +21,12 @@ def get_bq_client():
 
 def ja_comentou_rodada_fechada(client, rodada):
     """Verifica se já existe comentário para esta rodada oficial"""
-    query = f"""
-        SELECT COUNT(*) as qtd FROM `{client.project}.{TAB_CORNETA}` 
-        WHERE rodada = {rodada} 
-        AND (texto NOT LIKE '%pré-temporada%' AND texto NOT LIKE '%AO VIVO%')
-    """
     try:
+        query = f"""
+            SELECT COUNT(*) as qtd FROM `{client.project}.{TAB_CORNETA}` 
+            WHERE rodada = {rodada} 
+            AND (texto NOT LIKE '%pré-temporada%' AND texto NOT LIKE '%AO VIVO%')
+        """
         res = list(client.query(query).result())
         return res[0].qtd > 0
     except: return False
@@ -34,7 +34,6 @@ def ja_comentou_rodada_fechada(client, rodada):
 def gerar_analise_gemini(df_ranking, rodada, status_rodada):
     if not GEMINI_KEY: return "IA sem contrato."
 
-    # Prepara os dados expandidos (Líder, Vice, Vice-Lanterna, Lanterna)
     qtd = len(df_ranking)
     lider = df_ranking.iloc[0]
     lanterna = df_ranking.iloc[-1]
@@ -44,26 +43,24 @@ def gerar_analise_gemini(df_ranking, rodada, status_rodada):
     
     txt_status = "AO VIVO (Parcial)" if status_rodada == 'PARCIAL' else "FINALIZADA"
 
-    # Prompt Rico para o Gemini 2.0 Flash
     prompt = f"""
     Você é um comentarista de futebol e Fantasy Game (Cartola FC) sarcástico e ácido.
     Analise a RODADA {rodada} ({txt_status}) da liga.
 
     DADOS:
-    1. 🥇 LÍDER: {lider['nome']} fez {lider['pontos']:.1f} pts (Patrimônio: C$ {lider['patrimonio']:.1f}).
+    1. 🥇 LÍDER: {lider['nome']} fez {lider['pontos']:.1f} pts (Patrimônio: C$ {lider.get('patrimonio', 100):.1f}).
     {f"2. 🥈 VICE-LÍDER: {vice_lider['nome']} fez {vice_lider['pontos']:.1f} pts (Está na cola!)." if vice_lider is not None else ""}
     
     ... (meio da tabela) ...
 
     {f"3. 🥉 VICE-LANTERNA: {vice_lanterna['nome']} fez {vice_lanterna['pontos']:.1f} pts (Por pouco!)." if vice_lanterna is not None else ""}
-    4. 🐌 LANTERNA: {lanterna['nome']} fez {lanterna['pontos']:.1f} pts (Patrimônio: C$ {lanterna['patrimonio']:.1f}).
+    4. 🐌 LANTERNA: {lanterna['nome']} fez {lanterna['pontos']:.1f} pts (Patrimônio: C$ {lanterna.get('patrimonio', 100):.1f}).
 
     MISSÃO:
     Escreva um parágrafo curto (max 400 caracteres) zoando o lanterna e o vice-lanterna, e alertando o líder que o vice está chegando (ou elogiando a sorte do líder).
     Use emojis. Se for rodada AO VIVO, diga que "ainda tem jogo". Se for FINALIZADA, decrete o resultado.
     """
 
-    # URL para Gemini 2.0 Flash (Mais rápido e inteligente)
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}"
     
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
@@ -94,14 +91,19 @@ def main():
         print("📭 Nenhum dado no histórico para comentar.")
         return
 
-    # Extrai metadados da rodada atual do banco
+    # --- CORREÇÃO DO ERRO AQUI ---
     rodada_banco = int(df_ranking.iloc[0]['rodada'])
-    tipo_dado = df_ranking.iloc[0]['tipo_dado'] # OFICIAL ou PARCIAL
+    
+    # Verifica se a coluna existe. Se não existir (dados antigos), assume OFICIAL.
+    if 'tipo_dado' in df_ranking.columns:
+        tipo_dado = df_ranking.iloc[0]['tipo_dado']
+    else:
+        tipo_dado = 'OFICIAL' 
+    # -----------------------------
 
     print(f"🎤 Preparando narração para Rodada {rodada_banco} ({tipo_dado})...")
 
     # 2. Check de redundância
-    # Se a rodada é OFICIAL e já comentamos ela, não comenta de novo.
     if tipo_dado == 'OFICIAL' and ja_comentou_rodada_fechada(client, rodada_banco):
         print("🤐 Rodada oficial já comentada anteriormente. Narrador em silêncio.")
         return
