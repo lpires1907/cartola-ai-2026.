@@ -2,146 +2,200 @@ import streamlit as st
 import pandas as pd
 from google.cloud import bigquery
 from google.oauth2 import service_account
-import json
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(
-    page_title="Cartola AI 2026", 
-    layout="wide", 
+    page_title="Cartola Analytics 2026",
+    layout="wide",
     page_icon="⚽",
     initial_sidebar_state="collapsed"
 )
 
-# --- FUNÇÃO DE CONEXÃO (BIGQUERY) ---
+# --- ESTILOS CSS (Visual Moderno) ---
+st.markdown("""
+    <style>
+    .stMetric { background-color: #f8f9fa; padding: 15px; border-radius: 10px; border: 1px solid #e9ecef; }
+    .css-1v0mbdj.etr89bj1 { display: block; } /* Ajuste de imagens */
+    </style>
+""", unsafe_allow_html=True)
+
+# --- CONEXÃO BIGQUERY ---
 @st.cache_resource
 def get_bq_client():
-    """
-    Conecta ao BigQuery usando as credenciais salvas nos Secrets do Streamlit Cloud.
-    """
     try:
-        # Pega o JSON que você salvou nos Secrets com aspas triplas
-        info_chave = st.secrets["GCP_SERVICE_ACCOUNT"]
-        credentials = service_account.Credentials.from_service_account_info(info_chave)
-        return bigquery.Client(credentials=credentials, project=info_chave['project_id'])
+        info = st.secrets["GCP_SERVICE_ACCOUNT"]
+        return bigquery.Client(credentials=service_account.Credentials.from_service_account_info(info), project=info['project_id'])
     except Exception as e:
-        st.error(f"Erro ao conectar no Google Cloud: {e}")
+        st.error(f"Erro de conexão: {e}")
         return None
 
-# --- CARREGAMENTO DOS DADOS ---
-@st.cache_data(ttl=600) # Atualiza os dados a cada 10 minutos
+# --- CARREGAR DADOS ---
+@st.cache_data(ttl=300)
 def carregar_dados():
     client = get_bq_client()
-    if not client:
-        return pd.DataFrame(), pd.DataFrame()
+    if not client: return None, None, None, None
 
-    # Define o caminho da tabela (Projeto.Dataset)
-    project_id = client.project
-    dataset_id = "cartola_analytics" 
+    proj = client.project
+    ds = "cartola_analytics"
 
     try:
-        # 1. Busca todo o histórico de pontos
-        query_hist = f"""
-            SELECT * FROM `{project_id}.{dataset_id}.historico` 
-            ORDER BY timestamp ASC
-        """
-        df_hist = client.query(query_hist).to_dataframe()
+        # 1. VIEW CONSOLIDADA (Classificação Geral)
+        df_cons = client.query(f"SELECT * FROM `{proj}.{ds}.view_consolidada_times` ORDER BY total_geral DESC").to_dataframe()
 
-        # 2. Busca apenas o comentário mais recente da IA
-        query_corneta = f"""
-            SELECT * FROM `{project_id}.{dataset_id}.comentarios_ia` 
-            ORDER BY data DESC LIMIT 1
-        """
-        df_corneta = client.query(query_corneta).to_dataframe()
+        # 2. HISTÓRICO COMPLETO (Para gráfico de evolução)
+        df_evo = client.query(f"""
+            SELECT nome, rodada, pontos, tipo_dado 
+            FROM `{proj}.{ds}.historico` 
+            ORDER BY rodada ASC
+        """).to_dataframe()
+
+        # 3. ESCALAÇÕES DETALHADAS (Da última rodada disponível)
+        df_esc = client.query(f"""
+            SELECT * FROM `{proj}.{ds}.times_escalacoes` 
+            WHERE rodada = (SELECT MAX(rodada) FROM `{proj}.{ds}.times_escalacoes`)
+        """).to_dataframe()
+
+        # 4. CORNETA (Busca os 10 últimos para filtrar por tipo)
+        df_ia = client.query(f"""
+            SELECT * FROM `{proj}.{ds}.comentarios_ia` 
+            ORDER BY data DESC LIMIT 10
+        """).to_dataframe()
+
+        return df_cons, df_evo, df_esc, df_ia
+    except Exception: 
+        return None, None, None, None
+
+# --- INTERFACE PRINCIPAL ---
+st.title("⚽ Cartola Analytics 2026")
+
+df_cons, df_evo, df_esc, df_ia = carregar_dados()
+
+# Tratamento para banco vazio
+if df_cons is None or df_cons.empty:
+    st.warning("⚠️ Aguardando carga inicial de dados. O robô coletor deve rodar em breve.")
+    if st.button("🔄 Tentar Recarregar"): st.rerun()
+    st.stop()
+
+# --- SEPARAÇÃO DOS COMENTÁRIOS DA IA ---
+txt_rodada = None
+txt_geral = None
+
+if not df_ia.empty:
+    # Verifica se a tabela nova já tem a coluna 'tipo'
+    if 'tipo' in df_ia.columns:
+        # Pega o mais recente de cada tipo
+        filt_rodada = df_ia[df_ia['tipo'] == 'RODADA']
+        filt_geral = df_ia[df_ia['tipo'] == 'GERAL']
         
-        return df_hist, df_corneta
+        if not filt_rodada.empty: txt_rodada = filt_rodada.iloc[0]['texto']
+        if not filt_geral.empty: txt_geral = filt_geral.iloc[0]['texto']
+    else:
+        # Fallback para dados antigos (antes da atualização)
+        txt_rodada = df_ia.iloc[0]['texto']
+
+# 1. EXIBE NARRADOR DA RODADA (Destaque no topo)
+if txt_rodada:
+    status_dados = df_evo.iloc[-1]['tipo_dado'] # Pega status da última linha carregada
+    icon = "🔴" if status_dados == "PARCIAL" else "🟢"
+    st.info(f"{icon} **Resumo da Rodada:** {txt_rodada}")
+
+st.divider()
+
+# --- ABAS DE CONTEÚDO ---
+tab1, tab2, tab3 = st.tabs(["🏆 Classificação Geral", "📈 Evolução", "👕 Escalações"])
+
+# === ABA 1: VIEW CONSOLIDADA ===
+with tab1:
+    # 2. EXIBE ANALISTA GERAL (Box diferenciado dentro da classificação)
+    if txt_geral:
+        st.markdown(f"""
+        <div style="background-color:#f0f8ff; padding:15px; border-radius:10px; margin-bottom:20px; border-left:5px solid #007bff;">
+            <h4 style="margin-top:0; color: #007bff;">🧠 Análise de Temporada (IA)</h4>
+            <p style="font-style:italic; margin-bottom:0;">"{txt_geral}"</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+    col_kpi, col_tab = st.columns([1, 2])
+    
+    with col_kpi:
+        lider = df_cons.iloc[0]
+        st.subheader("Destaques")
+        st.metric("🥇 Líder Geral", lider['nome'], f"{lider['total_geral']:.1f} pts")
+        st.metric("📊 Média do Líder", f"{lider['media_pontos']:.1f} pts/rodada")
         
-    except Exception as e:
-        # Esse erro acontece se o GitHub Action ainda não tiver rodado a primeira vez
-        return pd.DataFrame(), pd.DataFrame()
+        recordista = df_cons.sort_values('maior_pontuacao', ascending=False).iloc[0]
+        st.metric("🚀 Maior 'Mitada'", recordista['nome'], f"{recordista['maior_pontuacao']:.1f} pts")
 
-# --- INTERFACE DO DASHBOARD ---
-st.title("⚽ Cartola AI - Monitoramento da Liga")
-st.caption("Dados atualizados automaticamente diariamente via BigQuery & Gemini AI")
-
-df_hist, df_corneta = carregar_dados()
-
-if not df_hist.empty:
-    
-    # === SEÇÃO 1: A CORNETA DA IA ===
-    if not df_corneta.empty:
-        texto_ia = df_corneta['texto'].iloc[0]
-        st.info(f"🤖 **O Especialista diz:** {texto_ia}")
-
-    st.divider()
-
-    # === SEÇÃO 2: MÉTRICAS (KPIs) ===
-    # Filtra apenas a última coleta de dados baseada no tempo
-    ultimo_ts = df_hist['timestamp'].max()
-    ranking_atual = df_hist[df_hist['timestamp'] == ultimo_ts].sort_values(by='pontos', ascending=False)
-    
-    lider = ranking_atual.iloc[0]
-    vice_lider = ranking_atual.iloc[1]
-    vice_lanterna = ranking_atual.iloc[-2]
-    lanterna = ranking_atual.iloc[-1]
-    
-    col1, col2, col3, col4, col5 = st.columns(5)
-    
-    col1.metric("🥇 Líder", lider['nome'], f"{lider['pontos']:.1f} pts")
-    col2.metric("🥈 Vice-Líder", vice_lider['nome'], f"{vice_lider['pontos']:.1f} pts")
-    col3.metric("📅 Atualizado em", ultimo_ts.strftime('%d/%m às %H:%M'))
-    col4.metric("🥉 Vice-Lanterna", vice_lanterna['nome'], f"{vice_lanterna['pontos']:.1f} pts")
-    col5.metric("🐌 Lanterna", lanterna['nome'], f"{lanterna['pontos']:.1f} pts")
-
-    st.divider()
-
-    # === SEÇÃO 3: GRÁFICOS E TABELAS ===
-    tab_grafico, tab_tabela, tab_filtro = st.tabs(["📈 Evolução da Rodada", "📋 Tabela Completa", "📊 Filtro por Rodada"])
-
-    with tab_grafico:
-        st.subheader("Quem está subindo e quem está descendo?")
-        # Transforma os dados: Linha do tempo no eixo X, Times nas linhas coloridas
-        df_pivot = df_hist.pivot(index='timestamp', columns='nome', values='pontos')
-        st.line_chart(df_pivot)
-
-    with tab_tabela:
-        st.subheader("Classificação Detalhada")
-        # Mostra a tabela bonita, escondendo o índice numérico feio
+    with col_tab:
+        st.subheader("Tabela do Campeonato")
+        cols_view = ['nome', 'total_geral', 'total_turno_1', 'total_turno_2', 'media_pontos', 'mediana_pontos']
+        
         st.dataframe(
-            ranking_atual[['nome', 'nome_cartola', 'pontos', 'patrimonio']], 
-            use_container_width=True, 
+            df_cons[cols_view],
+            column_config={
+                "nome": "Time",
+                "total_geral": st.column_config.NumberColumn("Total", format="%.1f"),
+                "total_turno_1": st.column_config.NumberColumn("1º Turno", format="%.1f"),
+                "total_turno_2": st.column_config.NumberColumn("2º Turno", format="%.1f"),
+                "media_pontos": st.column_config.NumberColumn("Média", format="%.1f"),
+                "mediana_pontos": st.column_config.NumberColumn("Mediana", format="%.1f"),
+            },
+            use_container_width=True,
             hide_index=True
         )
+
+# === ABA 2: EVOLUÇÃO ===
+with tab2:
+    st.subheader("Corrida pelo Título (Acumulado)")
+    # Pivotar e Acumular
+    df_pivot = df_evo.pivot_table(index='rodada', columns='nome', values='pontos', aggfunc='sum').fillna(0)
+    df_acumulado = df_pivot.cumsum()
+    st.line_chart(df_acumulado)
+
+# === ABA 3: ESCALAÇÕES ===
+with tab3:
+    st.subheader("Raio-X da Rodada")
     
-    with tab_filtro:
-        st.subheader("Pontuações por Rodada")
+    rodadas_disponiveis = sorted(df_evo['rodada'].unique(), reverse=True)
+    if rodadas_disponiveis:
+        rodada_sel = st.selectbox("Filtrar por Rodada:", rodadas_disponiveis)
         
-        # Obter lista de timestamps (rodadas)
-        rodadas = sorted(df_hist['timestamp'].unique(), reverse=True)
-        
-        # Selector de rodada
-        rodada_selecionada = st.selectbox(
-            "Selecione a rodada:",
-            rodadas,
-            format_func=lambda x: x.strftime('%d/%m/%Y às %H:%M')
+        # Tabela Simples da Rodada
+        st.write(f"**Pontuação na Rodada {rodada_sel}:**")
+        df_rodada_stats = df_evo[df_evo['rodada'] == rodada_sel].sort_values(by='pontos', ascending=False)
+        st.dataframe(
+            df_rodada_stats[['nome', 'pontos', 'tipo_dado']].reset_index(drop=True).assign(Pos=lambda x: x.index+1).set_index('Pos'),
+            use_container_width=True
         )
         
-        # Filtrar dados da rodada selecionada
-        df_rodada = df_hist[df_hist['timestamp'] == rodada_selecionada].sort_values(by='pontos', ascending=False)
+        st.divider()
         
-        # Exibir tabela com coluna de posição
-        df_rodada_exibir = df_rodada[['nome', 'nome_cartola', 'pontos', 'patrimonio']].reset_index(drop=True)
-        df_rodada_exibir.index = df_rodada_exibir.index + 1
-        df_rodada_exibir.index.name = 'Posição'
+        # Detalhes (Jogadores e Capitão)
+        # Só mostra se tiver dados detalhados para aquela rodada
+        rodada_detalhada_db = int(df_esc['rodada'].iloc[0]) if not df_esc.empty else -1
         
-        st.dataframe(df_rodada_exibir, use_container_width=True)
-
-else:
-    # Mensagem de espera caso o banco esteja vazio
-    st.warning("⚠️ Ainda não há dados disponíveis.")
-    st.markdown("""
-    **O que fazer:**
-    1. Verifique se o seu **GitHub Action** rodou com sucesso (deu "Verde").
-    2. Se rodou agora, aguarde uns instantes e clique no botão abaixo.
-    """)
-    if st.button("🔄 Tentar Recarregar"):
-        st.rerun()
+        if rodada_sel == rodada_detalhada_db:
+            st.subheader(f"Escalações Detalhadas (Rodada {rodada_sel})")
+            time_sel = st.selectbox("Ver time:", sorted(df_esc['liga_time_nome'].unique()))
+            
+            df_time = df_esc[df_esc['liga_time_nome'] == time_sel].sort_values(by='pontos', ascending=False)
+            
+            # Coluna de Capitão Visual
+            df_time['C'] = df_time['is_capitao'].apply(lambda x: "©️" if x else "")
+            
+            st.dataframe(
+                df_time[['C', 'atleta_posicao', 'atleta_apelido', 'atleta_clube', 'pontos']],
+                column_config={
+                    "C": "Capitão",
+                    "atleta_posicao": "Posição",
+                    "atleta_apelido": "Jogador",
+                    "atleta_clube": "Clube",
+                    "pontos": st.column_config.NumberColumn("Pts", format="%.1f")
+                },
+                use_container_width=True,
+                hide_index=True
+            )
+        else:
+            st.info("⚠️ Detalhes de jogadores disponíveis apenas para a última rodada carregada.")
+    else:
+        st.info("Sem dados de rodadas ainda.")
