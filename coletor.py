@@ -67,7 +67,7 @@ def get_headers():
 
 def get_mercado_status():
     try: return requests.get("https://api.cartola.globo.com/mercado/status", headers=get_headers()).json()
-    except: return {'status_mercado': 1, 'rodada_atual': 0, 'game_over': False} # Default seguro
+    except: return {'status_mercado': 1, 'rodada_atual': 0, 'game_over': False}
 
 def get_atletas_pontuados(rodada, is_live):
     url = "https://api.cartola.globo.com/atletas/pontuados" if is_live else f"https://api.cartola.globo.com/atletas/pontuados/{rodada}"
@@ -89,38 +89,36 @@ def main():
     client = get_bq_client()
     garantir_dataset(client)
 
-    # 1. Inteligência de Status (AGORA COM GAME_OVER)
+    # 1. Inteligência de Status
     status_api = get_mercado_status()
+    
+    # --- DEBUG DO STATUS (Para você ver no Log) ---
+    print(f"🕵️ DEBUG API: {status_api}") 
+    # ----------------------------------------------
+
     mercado_status = status_api.get('status_mercado', 1) 
     rodada_cartola = status_api.get('rodada_atual', 0)
-    game_over = status_api.get('game_over', False) # <--- O PULO DO GATO 🐱
-    
-    # Lógica Refinada:
-    # Se Mercado Fechado (2):
-    #    Se game_over=True -> "PREVIA" (Jogos acabaram, mas ainda não é Oficial)
-    #    Se game_over=False -> "PARCIAL" (Bola rolando)
-    # Se Mercado Aberto (1) -> "OFICIAL"
+    game_over = status_api.get('game_over', False)
     
     is_live = (mercado_status == 2)
     
     if is_live:
         if game_over:
-            tipo_dado = "PREVIA"
-            print("🏁 Jogos encerrados! (Status: PREVIA - Aguardando abertura do mercado)")
+            tipo_dado = "PREVIA" # Jogos acabaram, mas mercado fechado
+            print("🏁 Status: PREVIA (Jogos encerrados, auditando...)")
         else:
-            tipo_dado = "PARCIAL"
-            print("⚽ Bola rolando! (Status: PARCIAL)")
+            tipo_dado = "PARCIAL" # Jogos rolando
+            print("⚽ Status: PARCIAL (Bola rolando)")
         rodada_alvo = rodada_cartola
     else:
         tipo_dado = "OFICIAL"
         rodada_alvo = rodada_cartola - 1
-        print("🔒 Mercado Aberto (Status: OFICIAL)")
+        print("🔒 Status: OFICIAL (Mercado Aberto)")
 
     print(f"🔄 Rodada Alvo: {rodada_alvo}")
 
     if rodada_alvo < 1: print("⏸️ Rodada 0. Nada a fazer."); return
 
-    # Idempotência (Só para Oficial)
     if tipo_dado == "OFICIAL":
         ultima_bq = get_ultima_rodada_oficial_banco(client)
         if rodada_alvo <= ultima_bq: 
@@ -137,13 +135,13 @@ def main():
 
     res_liga = requests.get(f"https://api.cartola.globo.com/auth/liga/{LIGA_SLUG}", headers=get_headers())
     if res_liga.status_code != 200:
-        print(f"❌ Erro ao buscar liga: {res_liga.status_code}"); return
+        print(f"❌ Erro Liga: {res_liga.status_code}"); return
         
     times_liga = res_liga.json().get('times', [])
     ts_agora = datetime.now(pytz.timezone('America/Sao_Paulo'))
     l_hist, l_esc, l_atl = [], [], []
 
-    # Processa
+    # Processa Atletas Globais
     for id_atl, dados in dict_atletas_pts.items():
         if not str(id_atl).isdigit(): continue
         pos_id = str(dados.get('posicao_id', ''))
@@ -156,29 +154,41 @@ def main():
             'status_rodada': tipo_dado, 'timestamp': ts_agora
         })
 
+    # Processa Times
     print(f"🔄 Processando {len(times_liga)} times...")
     for time_obj in times_liga:
         dados_time = get_time_completo(time_obj['time_id'], rodada_alvo, is_live)
         atletas = dados_time.get('atletas', [])
         capitao_id = dados_time.get('capitao_id')
-        pontos_total = 0.0
+        pontos_total_calculado = 0.0 # Reinicia soma
         
         for atl in atletas:
             pid = str(atl['atleta_id'])
-            pts = float(dict_atletas_pts[pid].get('pontuacao', 0.0)) if pid in dict_atletas_pts else 0.0
-            pontos_total += pts
+            pts_brutos = float(dict_atletas_pts[pid].get('pontuacao', 0.0)) if pid in dict_atletas_pts else 0.0
+            
             eh_capitao = (int(pid) == int(capitao_id)) if capitao_id else False
+            
+            # --- CORREÇÃO MATEMÁTICA: Regra do Capitão (1.5x) ---
+            if eh_capitao:
+                pts_validos = pts_brutos * 1.5
+            else:
+                pts_validos = pts_brutos
+            
+            pontos_total_calculado += pts_validos
+            # ----------------------------------------------------
 
             l_esc.append({
                 'rodada': int(rodada_alvo), 'liga_time_nome': str(time_obj['nome']),
                 'atleta_apelido': str(atl.get('apelido', '')), 'atleta_posicao': posicoes.get(str(atl.get('posicao_id')), ''),
-                'pontos': pts, 'is_capitao': bool(eh_capitao),
+                'pontos': pts_validos, # Salva já com multiplicador na escalação também? Geralmente sim, para bater o total
+                'is_capitao': bool(eh_capitao),
                 'status_rodada': tipo_dado, 'timestamp': ts_agora
             })
 
         l_hist.append({
             'nome': str(time_obj['nome']), 'nome_cartola': str(time_obj.get('nome_cartola', '')),
-            'pontos': pontos_total, 'patrimonio': float(time_obj.get('patrimonio', 100)),
+            'pontos': pontos_total_calculado, # Agora bate com o site!
+            'patrimonio': float(time_obj.get('patrimonio', 100)),
             'rodada': int(rodada_alvo), 'timestamp': ts_agora, 'tipo_dado': tipo_dado
         })
 
