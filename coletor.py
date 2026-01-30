@@ -53,6 +53,7 @@ def limpar_dados_rodada(client, rodada):
             try:
                 client.query(sql).result()
             except Exception as e:
+                # Ignora erro se a tabela não existir ainda
                 if "Not found" not in str(e):
                     print(f"⚠️ Erro ao limpar tabela: {e}")
                     
