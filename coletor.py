@@ -70,10 +70,6 @@ def get_headers():
     }
 
 def get_mercado_status():
-    """
-    Retorna Status (1=Aberto, 2=Fechado) e a Rodada do Cartola.
-    Atenção: Se mercado aberto, a 'rodada_atual' é a PRÓXIMA (que ainda não aconteceu).
-    """
     try:
         res = requests.get("https://api.cartola.globo.com/mercado/status", headers=get_headers())
         return res.json()
@@ -103,24 +99,20 @@ def main():
 
     # 1. Inteligência de Carga
     status_api = get_mercado_status()
-    mercado_status = status_api.get('status_mercado', 1) # 1=Aberto, 2=Fechado
+    mercado_status = status_api.get('status_mercado', 1) 
     rodada_cartola = status_api.get('rodada_atual', 0)
     
-    # Define qual rodada vamos buscar
     is_live = False
     tipo_dado = "OFICIAL"
     rodada_alvo = 0
 
     if mercado_status == 2: 
-        # Mercado Fechado = Jogo Rolando = Parciais
         is_live = True
         tipo_dado = "PARCIAL"
         rodada_alvo = rodada_cartola
         print(f"⚡ Modo LIVE: Mercado fechado. Buscando parciais da Rodada {rodada_alvo}.")
         
     else:
-        # Mercado Aberto = Rodada anterior fechou = Oficial
-        # Se Cartola diz rodada 3, quer dizer que a 2 acabou. Queremos a 2.
         rodada_alvo = rodada_cartola - 1
         print(f"🔒 Modo FECHADO: Mercado aberto. Verificando dados oficiais da Rodada {rodada_alvo}.")
 
@@ -128,19 +120,26 @@ def main():
         print("⏸️ Pré-temporada ou Rodada 0. Nada a fazer.")
         return
 
-    # 2. Check de Idempotência (Já carreguei essa oficial?)
+    # 2. Check de Idempotência
     if not is_live:
         ultima_bq = get_ultima_rodada_oficial_banco(client)
         if rodada_alvo <= ultima_bq:
-            print(f"zzz Dados da Rodada {rodada_alvo} já existem no banco (Última DB: {ultima_bq}). Nenhuma ação necessária.")
+            print(f"zzz Dados da Rodada {rodada_alvo} já existem (Última DB: {ultima_bq}).")
             return
         else:
-            print(f"🚀 Nova rodada fechada detectada! (API: {rodada_alvo} > DB: {ultima_bq}). Iniciando carga...")
+            print(f"🚀 Nova rodada fechada detectada! (API: {rodada_alvo}). Iniciando carga...")
 
     # 3. Extração e Cruzamento
-    dict_atletas_pts = get_atletas_pontuados(rodada_alvo, is_live)
+    raw_atletas_pts = get_atletas_pontuados(rodada_alvo, is_live)
     
-    # Busca cache de metadados
+    # CORREÇÃO: Normalizar o dicionário de pontos
+    # A API às vezes retorna {'atletas': {ID: {...}}} ou direto {ID: {...}}
+    if 'atletas' in raw_atletas_pts:
+        dict_atletas_pts = raw_atletas_pts['atletas']
+    else:
+        dict_atletas_pts = raw_atletas_pts
+
+    # Cache de metadados
     try:
         clubes = {str(id): t['nome'] for id, t in requests.get("https://api.cartola.globo.com/clubes", headers=get_headers()).json().items()}
         posicoes = {'1': 'Goleiro', '2': 'Lateral', '3': 'Zagueiro', '4': 'Meia', '5': 'Atacante', '6': 'Técnico'}
@@ -153,9 +152,13 @@ def main():
     lista_escalacoes = []
     lista_atletas_globais = []
 
-    # Processa Atletas Globais (se houver dados)
+    # Processa Atletas Globais
     if dict_atletas_pts:
         for id_atl, dados in dict_atletas_pts.items():
+            # CORREÇÃO: Ignorar chaves que não sejam IDs numéricos (ex: "rodada", "total")
+            if not str(id_atl).isdigit():
+                continue
+                
             lista_atletas_globais.append({
                 'rodada': int(rodada_alvo),
                 'atleta_id': int(id_atl),
@@ -174,7 +177,12 @@ def main():
         
         for atl in escalacao:
             pid = str(atl['atleta_id'])
-            pts = float(dict_atletas_pts.get(pid, {}).get('pontuacao', 0.0))
+            
+            # Busca pontos do dicionário normalizado
+            pts = 0.0
+            if pid in dict_atletas_pts:
+                 pts = float(dict_atletas_pts[pid].get('pontuacao', 0.0))
+            
             pontos_total_calculado += pts
             
             lista_escalacoes.append({
@@ -187,20 +195,17 @@ def main():
                 'timestamp': ts_agora
             })
 
-        # Adiciona ao histórico (Agora com PATRIMONIO garantido)
-        # Se for LIVE, usamos o calculado. Se for OFICIAL, confiamos no calculado para consistência.
         lista_historico.append({
             'nome': str(time_obj['nome']),
             'nome_cartola': str(time_obj.get('nome_cartola', '')),
             'pontos': pontos_total_calculado,
-            'patrimonio': float(time_obj.get('patrimonio', 100)), # <--- NOVO CAMPO SOLICITADO
+            'patrimonio': float(time_obj.get('patrimonio', 100)),
             'rodada': int(rodada_alvo),
             'timestamp': ts_agora,
             'tipo_dado': tipo_dado
         })
 
     # 4. Carga no BigQuery
-    # Salvar Atletas Globais
     if lista_atletas_globais:
         schema = [
             bigquery.SchemaField("rodada", "INTEGER"), bigquery.SchemaField("atleta_id", "INTEGER"),
@@ -210,7 +215,6 @@ def main():
         ]
         salvar_bigquery(client, pd.DataFrame(lista_atletas_globais), TAB_ATLETAS, schema)
 
-    # Salvar Escalações
     if lista_escalacoes:
         schema = [
             bigquery.SchemaField("rodada", "INTEGER"), bigquery.SchemaField("liga_time_nome", "STRING"),
@@ -220,7 +224,6 @@ def main():
         ]
         salvar_bigquery(client, pd.DataFrame(lista_escalacoes), TAB_ESCALACOES, schema)
 
-    # Salvar Histórico da Liga
     if lista_historico:
         schema = [
             bigquery.SchemaField("nome", "STRING"), bigquery.SchemaField("nome_cartola", "STRING"),
