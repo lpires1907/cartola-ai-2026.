@@ -40,7 +40,13 @@ def garantir_dataset(client):
 
 def salvar_bigquery(client, df, tabela_nome, schema=None):
     table_id = f"{client.project}.{tabela_nome}"
-    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND", schema=schema)
+    # Configuração para permitir alteração de schema (adicionar coluna nova se precisar)
+    job_config = bigquery.LoadJobConfig(
+        write_disposition="WRITE_APPEND",
+        schema_update_options=[bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION],
+        schema=schema 
+    )
+    
     try:
         job = client.load_table_from_dataframe(df, table_id, job_config=job_config)
         job.result()
@@ -49,12 +55,21 @@ def salvar_bigquery(client, df, tabela_nome, schema=None):
         print(f"❌ Erro BigQuery ({tabela_nome}): {e}")
 
 # --- TRATAMENTO DE DADOS ---
-def extrair_pontuacao(dado_pontos):
+def extrair_detalhes(dado_pontos, liga_rodada_atual=0):
+    """
+    Retorna uma tupla: (pontos, rodada)
+    """
+    # Caso 1: Dado é um número direto (raro hoje em dia)
     if isinstance(dado_pontos, (int, float)):
-        return float(dado_pontos)
+        return float(dado_pontos), int(liga_rodada_atual)
+    
+    # Caso 2: Dado é um dicionário {'rodada': 32, 'campeonato': 45.5, ...}
     if isinstance(dado_pontos, dict):
-        return float(dado_pontos.get('campeonato') or 0.0)
-    return 0.0
+        pts = float(dado_pontos.get('campeonato') or 0.0)
+        rodada = int(dado_pontos.get('rodada') or liga_rodada_atual)
+        return pts, rodada
+        
+    return 0.0, int(liga_rodada_atual)
 
 # --- COLETA ---
 def coletar_dados():
@@ -63,7 +78,7 @@ def coletar_dados():
         'Authorization': f'Bearer {BEARER_TOKEN}',
         'x-glb-auth': 'oidc',
         'x-glb-app': 'cartola_web',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0',
     }
     
     print(f"🔍 Buscando dados da liga: {LIGA_SLUG}...")
@@ -75,86 +90,106 @@ def coletar_dados():
         print(f"❌ Erro API Cartola ({res.status_code}): {res.text}")
         return None
 
-# --- IA (VIA REST API - SEM BIBLIOTECA) ---
-def gerar_analise_ia(df_ranking):
+# --- IA (MODELO 1.5 FLASH - ESTÁVEL) ---
+def gerar_analise_ia(df_ranking, rodada_atual):
     if not GEMINI_KEY:
         print("Chave Gemini não encontrada.")
         return "IA indisponível."
     
-    # URL oficial da API REST do Gemini 2.0 Flash
-    # Documentação: https://ai.google.dev/api/generate-content
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}"
+    # MUDANÇA IMPORTANTE: Usando o modelo 1.5-flash que é estável e gratuito
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
     
-    lider = df_ranking.iloc[0]['nome']
-    lanterna = df_ranking.iloc[-1]['nome']
-    pontos_lider = df_ranking.iloc[0]['pontos']
+    qtd_times = len(df_ranking)
+    lider = df_ranking.iloc[0]
+    lanterna = df_ranking.iloc[-1]
     
+    info_vice_lider = ""
+    info_vice_lanterna = ""
+    
+    if qtd_times >= 2:
+        vice = df_ranking.iloc[1]
+        info_vice_lider = f"- Vice-Líder: {vice['nome']} ({vice['pontos']} pts)."
+    
+    if qtd_times >= 3:
+        v_lanterna = df_ranking.iloc[-2]
+        info_vice_lanterna = f"- Vice-Lanterna: {v_lanterna['nome']} ({v_lanterna['pontos']} pts)."
+
     prompt_texto = f"""
-    Você é um narrador esportivo brasileiro sarcástico (estilo "Corneteiro").
-    Resuma a situação atual da liga Cartola FC "{LIGA_SLUG}":
-    - Líder: {lider} com {pontos_lider} pontos.
-    - Lanterna: {lanterna}.
+    Você é um narrador esportivo sarcástico.
+    Estamos na RODADA {rodada_atual} da liga Cartola "{LIGA_SLUG}".
     
-    Faça um comentário ácido e engraçado de no máximo 200 caracteres elogiando (ou dizendo que é sorte) o líder e zoando o lanterna.
+    Resumo:
+    - Líder: {lider['nome']} ({lider['pontos']} pts).
+    {info_vice_lider}
+    {info_vice_lanterna}
+    - Lanterna: {lanterna['nome']} ({lanterna['pontos']} pts).
+    
+    Faça um comentário ácido e engraçado (max 280 caracteres).
+    Zoe o Lanterna e diga que o Líder está com sorte.
     """
 
-    payload = {
-        "contents": [{
-            "parts": [{"text": prompt_texto}]
-        }]
-    }
-    
+    payload = {"contents": [{"parts": [{"text": prompt_texto}]}]}
     headers = {'Content-Type': 'application/json'}
 
     try:
         response = requests.post(url, headers=headers, json=payload)
-        
         if response.status_code == 200:
             resultado = response.json()
-            # Navega no JSON de resposta para pegar o texto
-            texto = resultado['candidates'][0]['content']['parts'][0]['text']
-            return texto
+            return resultado['candidates'][0]['content']['parts'][0]['text']
         else:
-            print(f"❌ Erro na API REST Gemini ({response.status_code}): {response.text}")
-            return "O narrador está sem sinal (Erro na API)."
-            
+            print(f"❌ Erro API Gemini ({response.status_code}): {response.text}")
+            return "Narrador sem sinal."
     except Exception as e:
-        print(f"❌ Erro de conexão com Gemini: {e}")
-        return "O narrador foi demitido (Erro técnico)."
+        print(f"❌ Erro Conexão Gemini: {e}")
+        return "Narrador fora do ar."
 
 # --- FLUXO PRINCIPAL ---
 def main():
     if not BEARER_TOKEN:
-        print("⛔ ERRO: Secret CARTOLA_BEARER_TOKEN não encontrada.")
+        print("⛔ ERRO: Token não encontrado.")
         return
 
     dados = coletar_dados()
     if not dados: return
 
+    # Tenta pegar a rodada atual da liga caso venha no cabeçalho
+    # Se não vier, assume 0 e tentamos pegar individualmente de cada time
+    rodada_geral = dados.get('rodada_atual', 0)
+
     times = dados.get('times', [])
     if not times:
-        print("Nenhum time encontrado. Verifique Token/Slug.")
+        print("Nenhum time encontrado.")
         return
 
     ts_agora = datetime.now(pytz.timezone('America/Sao_Paulo'))
     
-    # 1. TRATAMENTO
     lista_limpa = []
+    max_rodada_encontrada = 0
+
     for time in times:
+        pontos, rodada = extrair_detalhes(time.get('pontos'), rodada_geral)
+        
+        # Guarda a maior rodada encontrada para usar no prompt da IA
+        if rodada > max_rodada_encontrada:
+            max_rodada_encontrada = rodada
+
         lista_limpa.append({
             'nome': str(time['nome']),
             'nome_cartola': str(time['nome_cartola']),
-            'pontos': extrair_pontuacao(time.get('pontos')),
+            'pontos': float(pontos),
+            'rodada': int(rodada), # <--- CAMPO NOVO
             'patrimonio': float(time.get('patrimonio', 100)),
             'timestamp': ts_agora
         })
 
     df_historico = pd.DataFrame(lista_limpa)
     
+    # Schema atualizado com RODADA
     schema_historico = [
         bigquery.SchemaField("nome", "STRING"),
         bigquery.SchemaField("nome_cartola", "STRING"),
         bigquery.SchemaField("pontos", "FLOAT"),
+        bigquery.SchemaField("rodada", "INTEGER"), # <--- CAMPO NOVO
         bigquery.SchemaField("patrimonio", "FLOAT"),
         bigquery.SchemaField("timestamp", "TIMESTAMP"),
     ]
@@ -165,23 +200,24 @@ def main():
     # Salva Times
     salvar_bigquery(client, df_historico, TABELA_HISTORICO, schema_historico)
     
-    # 2. GERAÇÃO DA IA
+    # IA
     ranking = df_historico.sort_values(by='pontos', ascending=False)
+    print(f"🤖 Gerando comentário da Rodada {max_rodada_encontrada} com Gemini 1.5...")
     
-    print("🤖 Gerando comentário via REST API (Gemini 2.0)...")
-    texto_ia = gerar_analise_ia(ranking)
+    texto_ia = gerar_analise_ia(ranking, max_rodada_encontrada)
     
     df_corneta = pd.DataFrame([{
         'texto': str(texto_ia), 
+        'rodada': int(max_rodada_encontrada), # Também salvamos a rodada na corneta
         'data': ts_agora
     }])
     
     schema_corneta = [
         bigquery.SchemaField("texto", "STRING"),
+        bigquery.SchemaField("rodada", "INTEGER"),
         bigquery.SchemaField("data", "TIMESTAMP"),
     ]
     
-    # Salva Comentários
     salvar_bigquery(client, df_corneta, TABELA_CORNETA, schema_corneta)
     
     print("\n🚀 Automação concluída!")
