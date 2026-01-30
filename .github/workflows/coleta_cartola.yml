@@ -2,8 +2,13 @@ name: Automação Cartola BigQuery
 
 on:
   schedule:
-    - cron: '0 * * * *' # Roda de hora em hora
-  workflow_dispatch:      # Permite rodar manualmente no botão
+    - cron: '0 3 * * *'   # 12 AM GMT-3 (03:00 UTC)
+    - cron: '0 19 * * *'  # 4 PM GMT-3 (19:00 UTC)
+    - cron: '0 21 * * *'  # 6 PM GMT-3 (21:00 UTC)
+    - cron: '0 23 * * *'  # 8 PM GMT-3 (23:00 UTC)
+    - cron: '0 1 * * *'   # 10 PM GMT-3 (01:00 UTC next day)
+    - cron: '0 15 * * *'  # 12 PM GMT-3 (15:00 UTC)
+  workflow_dispatch:
 
 jobs:
   coleta_e_envio:
@@ -18,16 +23,21 @@ jobs:
         with:
           python-version: '3.12'
 
-      # O ERRO ESTAVA AQUI EMBAIXO:
       - name: 📦 Instalar Dependências
         run: |
           python -m pip install --upgrade pip
-          pip install pandas-gbq
-          pip install -r requirements.txt
+          pip install pandas-gbq requests google-cloud-bigquery db-dtypes pytz
 
-      - name: 🚀 Executar Coletor
+      # Passo 1: Carrega os dados (se houver novidade)
+      - name: 🚛 Executar Coletor (ETL)
         env:
           CARTOLA_BEARER_TOKEN: ${{ secrets.CARTOLA_BEARER_TOKEN }}
           GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python coletor.py
+
+      # Passo 2: Narra os fatos (se houver novidade)
+      - name: 🎙️ Executar Narrador (IA)
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+        run: python narrador.py
