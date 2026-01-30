@@ -61,7 +61,7 @@ def carregar_dados():
 
 # --- INTERFACE DO DASHBOARD ---
 st.title("⚽ Cartola AI - Monitoramento da Liga")
-st.caption("Dados atualizados automaticamente via GitHub Actions + BigQuery")
+st.caption("Dados atualizados automaticamente diariamente via BigQuery & Gemini AI")
 
 df_hist, df_corneta = carregar_dados()
 
