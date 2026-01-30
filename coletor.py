@@ -32,19 +32,12 @@ def garantir_dataset(client):
     except: pass
 
 def get_ultima_rodada_oficial_banco(client):
-    """Verifica qual a última rodada OFICIAL carregada para não duplicar"""
-    query = f"""
-        SELECT MAX(rodada) as max_rodada 
-        FROM `{client.project}.{TAB_HISTORICO}` 
-        WHERE tipo_dado = 'OFICIAL'
-    """
     try:
-        query_job = client.query(query)
-        results = list(query_job.result())
+        query = f"SELECT MAX(rodada) as max_rodada FROM `{client.project}.{TAB_HISTORICO}` WHERE tipo_dado = 'OFICIAL'"
+        results = list(client.query(query).result())
         max_rodada = results[0].max_rodada
         return max_rodada if max_rodada is not None else -1
-    except:
-        return -1
+    except: return -1
 
 def salvar_bigquery(client, df, tabela, schema):
     if df.empty: return
@@ -66,7 +59,7 @@ def get_headers():
         'Authorization': f'Bearer {BEARER_TOKEN}',
         'x-glb-auth': 'oidc',
         'x-glb-app': 'cartola_web',
-        'User-Agent': 'Mozilla/5.0'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
     }
 
 def get_mercado_status():
@@ -111,7 +104,6 @@ def main():
         tipo_dado = "PARCIAL"
         rodada_alvo = rodada_cartola
         print(f"⚡ Modo LIVE: Mercado fechado. Buscando parciais da Rodada {rodada_alvo}.")
-        
     else:
         rodada_alvo = rodada_cartola - 1
         print(f"🔒 Modo FECHADO: Mercado aberto. Verificando dados oficiais da Rodada {rodada_alvo}.")
@@ -120,7 +112,7 @@ def main():
         print("⏸️ Pré-temporada ou Rodada 0. Nada a fazer.")
         return
 
-    # 2. Check de Idempotência
+    # Check de Idempotência
     if not is_live:
         ultima_bq = get_ultima_rodada_oficial_banco(client)
         if rodada_alvo <= ultima_bq:
@@ -129,45 +121,43 @@ def main():
         else:
             print(f"🚀 Nova rodada fechada detectada! (API: {rodada_alvo}). Iniciando carga...")
 
-    # 3. Extração e Cruzamento
+    # 2. Extração e Cruzamento
     raw_atletas_pts = get_atletas_pontuados(rodada_alvo, is_live)
-    
-    # CORREÇÃO: Normalizar o dicionário de pontos
-    # A API às vezes retorna {'atletas': {ID: {...}}} ou direto {ID: {...}}
-    if 'atletas' in raw_atletas_pts:
-        dict_atletas_pts = raw_atletas_pts['atletas']
-    else:
-        dict_atletas_pts = raw_atletas_pts
+    dict_atletas_pts = raw_atletas_pts.get('atletas', raw_atletas_pts) if isinstance(raw_atletas_pts, dict) else {}
 
-    # Cache de metadados
+    # Metadados
     try:
         clubes = {str(id): t['nome'] for id, t in requests.get("https://api.cartola.globo.com/clubes", headers=get_headers()).json().items()}
         posicoes = {'1': 'Goleiro', '2': 'Lateral', '3': 'Zagueiro', '4': 'Meia', '5': 'Atacante', '6': 'Técnico'}
     except: clubes, posicoes = {}, {}
 
-    times_liga = requests.get(f"https://api.cartola.globo.com/auth/liga/{LIGA_SLUG}", headers=get_headers()).json().get('times', [])
-    ts_agora = datetime.now(pytz.timezone('America/Sao_Paulo'))
+    # --- AQUI ESTAVA O PROBLEMA: BUSCA DA LIGA COM DEBUG ---
+    print(f"🔍 Buscando Liga: {LIGA_SLUG}...")
+    res_liga = requests.get(f"https://api.cartola.globo.com/auth/liga/{LIGA_SLUG}", headers=get_headers())
+    
+    if res_liga.status_code != 200:
+        print(f"❌ ERRO CRÍTICO AO BUSCAR LIGA: {res_liga.status_code}")
+        print(f"Mensagem da API: {res_liga.text}")
+        print("👉 Verifique se o Token está válido e se você é membro desta liga.")
+        return
 
-    lista_historico = []
-    lista_escalacoes = []
-    lista_atletas_globais = []
+    times_liga = res_liga.json().get('times', [])
+    if not times_liga:
+        print("⚠️ A API retornou sucesso (200), mas a lista de times está VAZIA.")
+        print("👉 Verifique se o Slug da liga está correto.")
+        return
+
+    ts_agora = datetime.now(pytz.timezone('America/Sao_Paulo'))
+    lista_historico, lista_escalacoes, lista_atletas_globais = [], [], []
 
     # Processa Atletas Globais
-    if dict_atletas_pts:
-        for id_atl, dados in dict_atletas_pts.items():
-            # CORREÇÃO: Ignorar chaves que não sejam IDs numéricos (ex: "rodada", "total")
-            if not str(id_atl).isdigit():
-                continue
-                
-            lista_atletas_globais.append({
-                'rodada': int(rodada_alvo),
-                'atleta_id': int(id_atl),
-                'atleta_apelido': str(dados.get('apelido', '')),
-                'atleta_clube': clubes.get(str(dados.get('clube_id')), 'Outros'),
-                'pontos': float(dados.get('pontuacao', 0.0)),
-                'status_rodada': tipo_dado,
-                'timestamp': ts_agora
-            })
+    for id_atl, dados in dict_atletas_pts.items():
+        if not str(id_atl).isdigit(): continue
+        lista_atletas_globais.append({
+            'rodada': int(rodada_alvo), 'atleta_id': int(id_atl), 'atleta_apelido': str(dados.get('apelido', '')),
+            'atleta_clube': clubes.get(str(dados.get('clube_id')), 'Outros'), 'pontos': float(dados.get('pontuacao', 0.0)),
+            'status_rodada': tipo_dado, 'timestamp': ts_agora
+        })
 
     # Processa Times da Liga
     print(f"🔄 Processando {len(times_liga)} times da liga...")
@@ -177,60 +167,32 @@ def main():
         
         for atl in escalacao:
             pid = str(atl['atleta_id'])
-            
-            # Busca pontos do dicionário normalizado
-            pts = 0.0
-            if pid in dict_atletas_pts:
-                 pts = float(dict_atletas_pts[pid].get('pontuacao', 0.0))
-            
+            pts = float(dict_atletas_pts[pid].get('pontuacao', 0.0)) if pid in dict_atletas_pts else 0.0
             pontos_total_calculado += pts
             
             lista_escalacoes.append({
-                'rodada': int(rodada_alvo),
-                'liga_time_nome': str(time_obj['nome']),
-                'atleta_apelido': str(atl.get('apelido', '')),
-                'atleta_posicao': posicoes.get(str(atl.get('posicao_id')), ''),
-                'pontos': pts,
-                'status_rodada': tipo_dado,
-                'timestamp': ts_agora
+                'rodada': int(rodada_alvo), 'liga_time_nome': str(time_obj['nome']),
+                'atleta_apelido': str(atl.get('apelido', '')), 'atleta_posicao': posicoes.get(str(atl.get('posicao_id')), ''),
+                'pontos': pts, 'status_rodada': tipo_dado, 'timestamp': ts_agora
             })
 
         lista_historico.append({
-            'nome': str(time_obj['nome']),
-            'nome_cartola': str(time_obj.get('nome_cartola', '')),
-            'pontos': pontos_total_calculado,
-            'patrimonio': float(time_obj.get('patrimonio', 100)),
-            'rodada': int(rodada_alvo),
-            'timestamp': ts_agora,
-            'tipo_dado': tipo_dado
+            'nome': str(time_obj['nome']), 'nome_cartola': str(time_obj.get('nome_cartola', '')),
+            'pontos': pontos_total_calculado, 'patrimonio': float(time_obj.get('patrimonio', 100)),
+            'rodada': int(rodada_alvo), 'timestamp': ts_agora, 'tipo_dado': tipo_dado
         })
 
-    # 4. Carga no BigQuery
+    # 3. Carga no BigQuery
     if lista_atletas_globais:
-        schema = [
-            bigquery.SchemaField("rodada", "INTEGER"), bigquery.SchemaField("atleta_id", "INTEGER"),
-            bigquery.SchemaField("atleta_apelido", "STRING"), bigquery.SchemaField("atleta_clube", "STRING"),
-            bigquery.SchemaField("pontos", "FLOAT"), bigquery.SchemaField("status_rodada", "STRING"),
-            bigquery.SchemaField("timestamp", "TIMESTAMP")
-        ]
+        schema = [bigquery.SchemaField("rodada", "INTEGER"), bigquery.SchemaField("atleta_id", "INTEGER"), bigquery.SchemaField("atleta_apelido", "STRING"), bigquery.SchemaField("atleta_clube", "STRING"), bigquery.SchemaField("pontos", "FLOAT"), bigquery.SchemaField("status_rodada", "STRING"), bigquery.SchemaField("timestamp", "TIMESTAMP")]
         salvar_bigquery(client, pd.DataFrame(lista_atletas_globais), TAB_ATLETAS, schema)
 
     if lista_escalacoes:
-        schema = [
-            bigquery.SchemaField("rodada", "INTEGER"), bigquery.SchemaField("liga_time_nome", "STRING"),
-            bigquery.SchemaField("atleta_apelido", "STRING"), bigquery.SchemaField("atleta_posicao", "STRING"),
-            bigquery.SchemaField("pontos", "FLOAT"), bigquery.SchemaField("status_rodada", "STRING"),
-            bigquery.SchemaField("timestamp", "TIMESTAMP")
-        ]
+        schema = [bigquery.SchemaField("rodada", "INTEGER"), bigquery.SchemaField("liga_time_nome", "STRING"), bigquery.SchemaField("atleta_apelido", "STRING"), bigquery.SchemaField("atleta_posicao", "STRING"), bigquery.SchemaField("pontos", "FLOAT"), bigquery.SchemaField("status_rodada", "STRING"), bigquery.SchemaField("timestamp", "TIMESTAMP")]
         salvar_bigquery(client, pd.DataFrame(lista_escalacoes), TAB_ESCALACOES, schema)
 
     if lista_historico:
-        schema = [
-            bigquery.SchemaField("nome", "STRING"), bigquery.SchemaField("nome_cartola", "STRING"),
-            bigquery.SchemaField("pontos", "FLOAT"), bigquery.SchemaField("patrimonio", "FLOAT"),
-            bigquery.SchemaField("rodada", "INTEGER"), bigquery.SchemaField("timestamp", "TIMESTAMP"),
-            bigquery.SchemaField("tipo_dado", "STRING")
-        ]
+        schema = [bigquery.SchemaField("nome", "STRING"), bigquery.SchemaField("nome_cartola", "STRING"), bigquery.SchemaField("pontos", "FLOAT"), bigquery.SchemaField("patrimonio", "FLOAT"), bigquery.SchemaField("rodada", "INTEGER"), bigquery.SchemaField("timestamp", "TIMESTAMP"), bigquery.SchemaField("tipo_dado", "STRING")]
         salvar_bigquery(client, pd.DataFrame(lista_historico), TAB_HISTORICO, schema)
 
     print("🏁 Processo de carga finalizado.")
