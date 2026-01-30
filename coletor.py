@@ -40,7 +40,6 @@ def garantir_dataset(client):
 
 def salvar_bigquery(client, df, tabela_nome, schema=None):
     table_id = f"{client.project}.{tabela_nome}"
-    # Configuração para permitir alteração de schema (adicionar coluna nova se precisar)
     job_config = bigquery.LoadJobConfig(
         write_disposition="WRITE_APPEND",
         schema_update_options=[bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION],
@@ -50,26 +49,47 @@ def salvar_bigquery(client, df, tabela_nome, schema=None):
     try:
         job = client.load_table_from_dataframe(df, table_id, job_config=job_config)
         job.result()
-        print(f"✅ Sucesso: Dados salvos em {tabela_nome}")
+        print(f"✅ Sucesso: {len(df)} linhas salvas em {tabela_nome}")
     except Exception as e:
         print(f"❌ Erro BigQuery ({tabela_nome}): {e}")
+        # Imprime o erro detalhado se houver
+        if hasattr(e, 'errors'):
+            print(f"Detalhes do erro: {e.errors}")
 
-# --- TRATAMENTO DE DADOS ---
-def extrair_detalhes(dado_pontos, liga_rodada_atual=0):
+# --- TRATAMENTO DE DADOS (CORRIGIDO) ---
+def extrair_detalhes(dado_pontos, liga_rodada_atual):
     """
-    Retorna uma tupla: (pontos, rodada)
+    Retorna uma tupla: (pontos_campeonato, numero_rodada)
     """
-    # Caso 1: Dado é um número direto (raro hoje em dia)
-    if isinstance(dado_pontos, (int, float)):
-        return float(dado_pontos), int(liga_rodada_atual)
-    
-    # Caso 2: Dado é um dicionário {'rodada': 32, 'campeonato': 45.5, ...}
+    rodada_numero = int(liga_rodada_atual)
+    pontos_total = 0.0
+
+    # Se for None, retorna zero e a rodada oficial da liga
+    if dado_pontos is None:
+        return pontos_total, rodada_numero
+
+    # Caso 1: Dado é um dicionário (Padrão atual)
     if isinstance(dado_pontos, dict):
-        pts = float(dado_pontos.get('campeonato') or 0.0)
-        rodada = int(dado_pontos.get('rodada') or liga_rodada_atual)
-        return pts, rodada
+        # 'campeonato': Pontuação total acumulada
+        # 'rodada': Pontuação DA rodada (Cuidado! Isso não é o ID da rodada)
         
-    return 0.0, int(liga_rodada_atual)
+        val_campeonato = dado_pontos.get('campeonato')
+        
+        if val_campeonato is not None:
+            pontos_total = float(val_campeonato)
+        else:
+            # Fallback: Tenta pegar 'rodada' se campeonato for nulo (início de camp)
+            val_rodada = dado_pontos.get('rodada')
+            if val_rodada is not None:
+                pontos_total = float(val_rodada)
+                
+        return pontos_total, rodada_numero
+        
+    # Caso 2: Dado é um número direto (fallback antigo)
+    if isinstance(dado_pontos, (int, float)):
+        return float(dado_pontos), rodada_numero
+        
+    return pontos_total, rodada_numero
 
 # --- COLETA ---
 def coletar_dados():
@@ -90,13 +110,12 @@ def coletar_dados():
         print(f"❌ Erro API Cartola ({res.status_code}): {res.text}")
         return None
 
-# --- IA (MODELO 1.5 FLASH - ESTÁVEL) ---
+# --- IA (GEMINI 1.5 FLASH) ---
 def gerar_analise_ia(df_ranking, rodada_atual):
     if not GEMINI_KEY:
         print("Chave Gemini não encontrada.")
         return "IA indisponível."
     
-    # MUDANÇA IMPORTANTE: Usando o modelo 1.5-flash que é estável e gratuito
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
     
     qtd_times = len(df_ranking)
@@ -152,44 +171,50 @@ def main():
     dados = coletar_dados()
     if not dados: return
 
-    # Tenta pegar a rodada atual da liga caso venha no cabeçalho
-    # Se não vier, assume 0 e tentamos pegar individualmente de cada time
-    rodada_geral = dados.get('rodada_atual', 0)
+    # --- DEBUG: IMPRIMIR ESTRUTURA REAL ---
+    # Isso vai mostrar no log exatamente o que o Cartola está mandando
+    print("-" * 30)
+    print(f"DEBUG ESTRUTURA JSON (Rodada Geral: {dados.get('rodada_atual')})")
+    if 'times' in dados and len(dados['times']) > 0:
+        exemplo = dados['times'][0]
+        print(f"Exemplo Time 1: {exemplo.get('nome')}")
+        print(f"Dados Pontos Time 1: {exemplo.get('pontos')}")
+        print("-" * 30)
+    # --------------------------------------
 
+    rodada_geral = dados.get('rodada_atual', 0)
     times = dados.get('times', [])
+    
     if not times:
         print("Nenhum time encontrado.")
         return
 
     ts_agora = datetime.now(pytz.timezone('America/Sao_Paulo'))
-    
     lista_limpa = []
-    max_rodada_encontrada = 0
 
     for time in times:
         pontos, rodada = extrair_detalhes(time.get('pontos'), rodada_geral)
         
-        # Guarda a maior rodada encontrada para usar no prompt da IA
-        if rodada > max_rodada_encontrada:
-            max_rodada_encontrada = rodada
-
         lista_limpa.append({
             'nome': str(time['nome']),
             'nome_cartola': str(time['nome_cartola']),
             'pontos': float(pontos),
-            'rodada': int(rodada), # <--- CAMPO NOVO
+            'rodada': int(rodada),
             'patrimonio': float(time.get('patrimonio', 100)),
             'timestamp': ts_agora
         })
 
     df_historico = pd.DataFrame(lista_limpa)
     
-    # Schema atualizado com RODADA
+    # DEBUG: Mostrar o que será salvo
+    print(f"📊 Preparando para salvar {len(df_historico)} registros.")
+    print(f"Média de pontos calculada: {df_historico['pontos'].mean()}")
+
     schema_historico = [
         bigquery.SchemaField("nome", "STRING"),
         bigquery.SchemaField("nome_cartola", "STRING"),
         bigquery.SchemaField("pontos", "FLOAT"),
-        bigquery.SchemaField("rodada", "INTEGER"), # <--- CAMPO NOVO
+        bigquery.SchemaField("rodada", "INTEGER"),
         bigquery.SchemaField("patrimonio", "FLOAT"),
         bigquery.SchemaField("timestamp", "TIMESTAMP"),
     ]
@@ -197,18 +222,16 @@ def main():
     client = get_bq_client()
     garantir_dataset(client)
     
-    # Salva Times
     salvar_bigquery(client, df_historico, TABELA_HISTORICO, schema_historico)
     
     # IA
     ranking = df_historico.sort_values(by='pontos', ascending=False)
-    print(f"🤖 Gerando comentário da Rodada {max_rodada_encontrada} com Gemini 1.5...")
-    
-    texto_ia = gerar_analise_ia(ranking, max_rodada_encontrada)
+    print(f"🤖 Gerando comentário da Rodada {rodada_geral}...")
+    texto_ia = gerar_analise_ia(ranking, rodada_geral)
     
     df_corneta = pd.DataFrame([{
         'texto': str(texto_ia), 
-        'rodada': int(max_rodada_encontrada), # Também salvamos a rodada na corneta
+        'rodada': int(rodada_geral),
         'data': ts_agora
     }])
     
