@@ -116,8 +116,6 @@ def main():
     mercado_status = status_api.get('status_mercado', 1) 
     rodada_cartola = status_api.get('rodada_atual', 0)
     
-    # Se mercado fechado (2) -> Estamos vivendo a rodada atual (Live)
-    # Se mercado aberto (1) -> Estamos olhando para a rodada que acabou (Anterior)
     is_live = (mercado_status == 2)
     tipo_dado = "PARCIAL" if is_live else "OFICIAL"
     rodada_alvo = rodada_cartola if is_live else (rodada_cartola - 1)
@@ -127,7 +125,6 @@ def main():
     if rodada_alvo < 1:
         print("⏸️ Rodada 0 ou Pré-temporada. Nada a fazer."); return
 
-    # Lógica de Idempotência: Se já temos OFICIAL dessa rodada, não faz nada.
     if not is_live:
         ultima_bq = get_ultima_rodada_oficial_banco(client)
         if rodada_alvo <= ultima_bq: 
@@ -138,7 +135,6 @@ def main():
 
     # 2. Obtenção de Dados Globais
     raw_pts = get_atletas_pontuados(rodada_alvo, is_live)
-    # Normaliza resposta da API (às vezes vem dentro de 'atletas', às vezes não)
     dict_atletas_pts = raw_pts.get('atletas', raw_pts) if isinstance(raw_pts, dict) else {}
     
     # Cache de Clubes e Posições
@@ -175,7 +171,6 @@ def main():
     # B) Processa Times da Liga
     print(f"🔄 Processando {len(times_liga)} times...")
     for time_obj in times_liga:
-        # Busca detalhes para pegar Capitão e Escalação
         dados_time = get_time_completo(time_obj['time_id'], rodada_alvo, is_live)
         atletas = dados_time.get('atletas', [])
         capitao_id = dados_time.get('capitao_id')
@@ -184,7 +179,6 @@ def main():
         
         for atl in atletas:
             pid = str(atl['atleta_id'])
-            # Pega pontuação do dict global (mais confiável em live)
             pts = float(dict_atletas_pts[pid].get('pontuacao', 0.0)) if pid in dict_atletas_pts else 0.0
             pontos_total += pts
             
@@ -198,7 +192,6 @@ def main():
                 'status_rodada': tipo_dado, 'timestamp': ts_agora
             })
 
-        # Adiciona ao histórico do time
         l_hist.append({
             'nome': str(time_obj['nome']), 'nome_cartola': str(time_obj.get('nome_cartola', '')),
             'pontos': pontos_total, 'patrimonio': float(time_obj.get('patrimonio', 100)),
@@ -206,7 +199,6 @@ def main():
         })
 
     # --- LIMPEZA DE DUPLICATAS ---
-    # Só limpamos se tivermos dados para inserir
     if l_hist:
         limpar_dados_rodada(client, rodada_alvo)
 
@@ -236,4 +228,9 @@ def main():
             bigquery.SchemaField("rodada", "INTEGER"), bigquery.SchemaField("timestamp", "TIMESTAMP"),
             bigquery.SchemaField("tipo_dado", "STRING")
         ]
-        salvar_bigquery(client, pd.DataFrame(l_hist), TAB_HISTORICO, s_
+        salvar_bigquery(client, pd.DataFrame(l_hist), TAB_HISTORICO, s_hist)
+
+    print("🏁 Fim.")
+
+if __name__ == "__main__":
+    main()
