@@ -24,7 +24,7 @@ def atualizar_campeoes_mensais():
 
     print("📊 Atualizando Campeões Mensais e Status...")
 
-    # nosec: Query interna segura
+    # nosec: Query segura
     query_merge = f"""
     MERGE `{client.project}.{TAB_MENSAL}` T
     USING (
@@ -59,7 +59,7 @@ def atualizar_campeoes_mensais():
             v.campeao,
             v.vice,
             CASE WHEN m.Rodada <= (SELECT max_rodada FROM UltimaRodada) THEN 'Fechado' ELSE 'Aberto' END as novo_status,
-            CURRENT_TIMESTAMP() as data_atualizacao
+            CAST(CURRENT_TIMESTAMP() AS STRING) as data_atualizacao
         FROM `{client.project}.{TAB_MENSAL}` m
         LEFT JOIN Vencedores v ON m.Mensal = v.Mensal
     ) S
@@ -96,7 +96,7 @@ def criar_view_completa():
         SUM(CASE WHEN m.Mensal = 'Nov Dez' THEN h.pontos ELSE 0 END) as pontos_nov_dez
     """
 
-    # nosec: Query DDL (Data Definition Language) requer strings literais no BigQuery.
+    # nosec: Query DDL
     sql = f"""
     CREATE OR REPLACE VIEW `{client.project}.{VIEW_CONSOLIDADA}` AS
     SELECT 

@@ -26,38 +26,42 @@ def buscar_token_automatico():
     senha = os.getenv('CARTOLA_SENHA')
     
     if not email or not senha:
-        print("⚠️ CARTOLA_EMAIL/SENHA não definidos.  Tentaremos acesso público.")
+        print("⚠️ CARTOLA_EMAIL/SENHA não definidos. Tentaremos acesso público.")
         return None
 
     print("🔐 Renovando Token de Acesso...")
     try:
         payload = {"payload": {"email": email, "password": senha, "serviceId": 438}}
         
-        # CORREÇÃO: Headers completos para evitar erro 406
+        # HEADERS BLINDADOS (Simulando Chrome Real)
         auth_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
             "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "application/json"
+            "Accept": "*/*",
+            "Origin": "https://login.globo.com",
+            "Referer": "https://login.globo.com/login/438",
+            "Connection": "keep-alive"
         }
 
         # Autentica na Globo
         res = requests.post(
             "https://login.globo.com/api/authentication", 
             json=payload, 
-            headers=auth_headers, # Adicionamos os headers aqui
+            headers=auth_headers, 
             timeout=TIMEOUT
         )
         res.raise_for_status()
         glb_id = res.json().get('glbId')
         
         # Pega Token do Cartola
-        headers_token = {
+        token_headers = {
             'Cookie': f'glbId={glb_id}',
-            'User-Agent': auth_headers['User-Agent'] # Reusa o User-Agent
+            'User-Agent': auth_headers['User-Agent'],
+            'Accept': 'application/json'
         }
         res_auth = requests.get(
             "https://api.cartola.globo.com/auth/token", 
-            headers=headers_token, 
+            headers=token_headers, 
             timeout=TIMEOUT
         )
         res_auth.raise_for_status()
@@ -67,7 +71,6 @@ def buscar_token_automatico():
         return token
     except Exception as e:
         print(f"⚠️ Falha no login automático: {e}")
-        # Retorna None para permitir que o script tente rodar em modo público
         return None
 
 # --- 2. INFRAESTRUTURA ---
