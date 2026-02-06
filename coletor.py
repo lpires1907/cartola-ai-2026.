@@ -25,22 +25,41 @@ def buscar_token_automatico():
     email = os.getenv('CARTOLA_EMAIL')
     senha = os.getenv('CARTOLA_SENHA')
     
-    # Se não tiver credenciais, retorna None e o script tentará modo público
     if not email or not senha:
-        print("⚠️ CARTOLA_EMAIL/SENHA não definidos. Tentaremos acesso público.")
+        print("⚠️ CARTOLA_EMAIL/SENHA não definidos.  Tentaremos acesso público.")
         return None
 
     print("🔐 Renovando Token de Acesso...")
     try:
         payload = {"payload": {"email": email, "password": senha, "serviceId": 438}}
+        
+        # CORREÇÃO: Headers completos para evitar erro 406
+        auth_headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json"
+        }
+
         # Autentica na Globo
-        res = requests.post("https://login.globo.com/api/authentication", json=payload, timeout=TIMEOUT)
+        res = requests.post(
+            "https://login.globo.com/api/authentication", 
+            json=payload, 
+            headers=auth_headers, # Adicionamos os headers aqui
+            timeout=TIMEOUT
+        )
         res.raise_for_status()
         glb_id = res.json().get('glbId')
         
         # Pega Token do Cartola
-        headers_auth = {'Cookie': f'glbId={glb_id}'}
-        res_auth = requests.get("https://api.cartola.globo.com/auth/token", headers=headers_auth, timeout=TIMEOUT)
+        headers_token = {
+            'Cookie': f'glbId={glb_id}',
+            'User-Agent': auth_headers['User-Agent'] # Reusa o User-Agent
+        }
+        res_auth = requests.get(
+            "https://api.cartola.globo.com/auth/token", 
+            headers=headers_token, 
+            timeout=TIMEOUT
+        )
         res_auth.raise_for_status()
         
         token = res_auth.json().get('token')
@@ -48,6 +67,7 @@ def buscar_token_automatico():
         return token
     except Exception as e:
         print(f"⚠️ Falha no login automático: {e}")
+        # Retorna None para permitir que o script tente rodar em modo público
         return None
 
 # --- 2. INFRAESTRUTURA ---

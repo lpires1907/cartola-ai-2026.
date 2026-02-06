@@ -24,7 +24,7 @@ def atualizar_campeoes_mensais():
 
     print("📊 Atualizando Campeões Mensais e Status...")
 
-    # nosec: Query de manutenção interna, variáveis controladas pelo código.
+    # nosec: Query interna segura
     query_merge = f"""
     MERGE `{client.project}.{TAB_MENSAL}` T
     USING (
@@ -66,7 +66,7 @@ def atualizar_campeoes_mensais():
     ON T.Rodada = S.Rodada
     WHEN MATCHED THEN
         UPDATE SET 
-            Campeao = S.campeao,
+            `Campeao ` = S.campeao,
             Vice = S.vice,
             Status = S.novo_status,
             DataStatus = S.data_atualizacao
