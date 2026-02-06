@@ -51,7 +51,7 @@ def garantir_dataset(client):
 
 def limpar_dados_rodada(client, rodada):
     print(f"🧹 Limpando dados da Rodada {rodada}...")
-    # nosec: Lista definida internamente
+    # O comentário '# nosec' deve ficar EXATAMENTE nesta linha:
     sqls = [f"DELETE FROM `{client.project}.{t}` WHERE rodada = {rodada}" for t in [TAB_HISTORICO, TAB_ESCALACOES, TAB_ATLETAS]] # nosec
     for sql in sqls:
         try: client.query(sql).result()
@@ -134,14 +134,12 @@ def rodar_coleta():
     if res_liga.status_code != 200:
         print(f"❌ Erro final ao acessar liga: {res_liga.status_code}")
         if res_liga.status_code == 500:
-            print("👉 O servidor da Globo retornou erro interno. Isso pode ser instabilidade momentânea ou cookie inválido para esta liga.")
-        elif res_liga.status_code == 404:
-            print(f"👉 Liga '{LIGA_SLUG}' não encontrada.")
+            print("👉 O servidor da Globo retornou erro interno.")
         return
 
     times_liga = res_liga.json().get('times', [])
     if not times_liga:
-        print("⚠️ A liga foi acessada, mas não retornou times. Verifique se a liga tem times confirmados.")
+        print("⚠️ A liga foi acessada, mas não retornou times.")
         return
 
     ts_agora = datetime.now(pytz.timezone('America/Sao_Paulo'))
