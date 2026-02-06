@@ -17,39 +17,54 @@ TAB_ATLETAS = f"{DATASET_ID}.atletas_globais"
 
 # Variáveis globais
 GCP_JSON = os.getenv('GCP_SERVICE_ACCOUNT')
-# Esta variável agora deve conter a STRING DE COOKIE COMPLETA copiada do navegador
 COOKIE_SECRET = os.getenv('CARTOLA_GLBID') 
 TIMEOUT = 30 
 
-# --- 1. GERENCIAMENTO DE HEADERS INTELIGENTE ---
+# --- 1. GERENCIAMENTO DE HEADERS (CORRIGIDO) ---
 def get_auth_headers():
     """
-    Constrói os headers de autenticação baseados no Cookie completo.
-    O segredo CARTOLA_GLBID agora deve ter a string inteira do cookie.
+    Constrói os headers PRO.
+    CORREÇÃO: Busca robusta pelo token GLBID (maiúsculo ou minúsculo).
     """
     if not COOKIE_SECRET:
         return None
 
-    # Tenta extrair o valor puro do glbId de dentro da string de cookies
-    # O header X-GLB-Token geralmente precisa ser apenas o valor do glbId
-    x_glb_token = ""
-    try:
-        # Procura por 'glbId=Valor;' ou 'glbId=Valor' no final
-        if "glbId=" in COOKIE_SECRET:
-            parts = COOKIE_SECRET.split('glbId=')[1]
-            x_glb_token = parts.split(';')[0]
-    except:
-        pass
+    # 1. O Header 'Cookie' deve ser a string completa que você colou
+    cookie_full = COOKIE_SECRET
 
-    # Se não achou glbId na string, usa a string toda (caso o usuário tenha colado só o ID)
+    # 2. O Header 'X-GLB-Token' precisa ser APENAS o valor do código
+    x_glb_token = ""
+    
+    try:
+        # Quebra a string em pedaços separados por ponto-e-vírgula
+        partes = [p.strip() for p in cookie_full.split(';')]
+        
+        for p in partes:
+            # Procura por GLBID= ou glbId= (case insensitive manual)
+            if p.startswith('GLBID=') or p.startswith('glbId='):
+                x_glb_token = p.split('=')[1]
+                break
+        
+        # Se não achou GLBID, tenta usar o glb_uid_jwt como fallback
+        if not x_glb_token:
+            for p in partes:
+                if p.startswith('glb_uid_jwt='):
+                    x_glb_token = p.split('=')[1]
+                    break
+                    
+    except Exception as e:
+        print(f"⚠️ Erro ao processar string de cookies: {e}")
+
+    # Se ainda estiver vazio, define um valor genérico para não quebrar (mas vai dar 401)
     if not x_glb_token:
-        x_glb_token = COOKIE_SECRET
+        print("⚠️ AVISO: Não foi possível extrair o GLBID ou JWT da string de cookies.")
+        x_glb_token = "erro_extracao"
 
     return {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
         'Accept': 'application/json',
-        'Cookie': COOKIE_SECRET,     # Envia TODOS os cookies (glbId, glb_uid_jwt, etc)
-        'X-GLB-Token': x_glb_token,  # Envia o ID da sessão como token
+        'Cookie': cookie_full,       # Cookie Completo
+        'X-GLB-Token': x_glb_token,  # Apenas o Token limpo
         'Referer': 'https://cartola.globo.com/',
         'Origin': 'https://cartola.globo.com'
     }
@@ -76,7 +91,7 @@ def garantir_dataset(client):
 
 def limpar_dados_rodada(client, rodada):
     print(f"🧹 Limpando dados da Rodada {rodada}...")
-    # nosec: Lista controlada
+    # nosec: Query interna segura
     sqls = [f"DELETE FROM `{client.project}.{t}` WHERE rodada = {rodada}" for t in [TAB_HISTORICO, TAB_ESCALACOES, TAB_ATLETAS]] # nosec
     for sql in sqls:
         try: client.query(sql).result()
@@ -92,13 +107,13 @@ def salvar_bigquery(client, df, tabela, schema):
 def get_dados_time_smart(time_id, rodada, is_live):
     url = f"https://api.cartola.globo.com/time/parcial/{time_id}" if is_live else f"https://api.cartola.globo.com/time/id/{time_id}/{rodada}"
     try:
-        # Tenta rota PRO (com cookies completos)
+        # Tenta rota PRO
         auth_h = get_auth_headers()
         if auth_h:
             res = requests.get(url, headers=auth_h, timeout=TIMEOUT)
             if res.status_code == 200: return res.json()
         
-        # Fallback Público (sem cookies)
+        # Fallback Público
         res = requests.get(url, headers=get_public_headers(), timeout=TIMEOUT)
         return res.json() if res.status_code == 200 else {'pontos': 0, 'atletas': []}
     except: return {'pontos': 0, 'atletas': []}
@@ -108,7 +123,8 @@ def rodar_coleta():
     if not COOKIE_SECRET:
         print("⚠️ AVISO: Variável CARTOLA_GLBID vazia.")
     else:
-        print("🍪 Cookies carregados via Secrets.")
+        # Máscara simples para logar sem vazar o segredo
+        print(f"🍪 Cookies carregados (Tamanho: {len(COOKIE_SECRET)} chars). Iniciando coleta PRO...")
     
     client = get_bq_client()
     garantir_dataset(client)
@@ -139,26 +155,31 @@ def rodar_coleta():
     # 3. BUSCA DA LIGA
     print(f"🌍 Tentando acessar dados da liga: {LIGA_SLUG}")
     
-    # Rota PRO (Autenticada)
+    # Rota PRO
     url_auth = f"https://api.cartola.globo.com/auth/liga/{LIGA_SLUG}"
-    res_liga = requests.get(url_auth, headers=get_auth_headers(), timeout=TIMEOUT)
+    headers_pro = get_auth_headers()
+    
+    res_liga = requests.get(url_auth, headers=headers_pro, timeout=TIMEOUT)
     
     if res_liga.status_code == 200:
         print("✅ Acesso via rota PRO (/auth/liga) funcionou!")
     else:
-        print(f"⚠️ Rota PRO falhou ({res_liga.status_code}). O Cookie pode estar incompleto ou expirado.")
-        # Se a autenticação falhar para uma liga privada, a pública também falhará (dá 500 ou 404).
-        # Mas tentamos mesmo assim caso a liga tenha se tornado pública.
+        print(f"⚠️ Rota PRO retornou {res_liga.status_code}. Tentando rota pública...")
+        # Fallback público (só User-Agent)
         url_pub = f"https://api.cartola.globo.com/liga/{LIGA_SLUG}"
         res_liga = requests.get(url_pub, headers=get_public_headers(), timeout=TIMEOUT)
 
     if res_liga.status_code != 200:
         print(f"❌ Erro final ao acessar liga: {res_liga.status_code}")
+        if res_liga.status_code == 401:
+            print("👉 Dica: O token X-GLB-Token pode estar incorreto ou o cookie expirou.")
+        elif res_liga.status_code == 500:
+             print("👉 Dica: Servidor da Globo rejeitou a requisição (provável conflito de sessão pública/privada).")
         return
 
     times_liga = res_liga.json().get('times', [])
     if not times_liga:
-        print(f"⚠️ A liga foi acessada mas não retornou times.")
+        print(f"⚠️ A liga foi acessada mas não retornou times. Resposta: {res_liga.json()}")
         return
 
     ts_agora = datetime.now(pytz.timezone('America/Sao_Paulo'))
