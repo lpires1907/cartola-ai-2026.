@@ -24,7 +24,7 @@ def atualizar_campeoes_mensais():
 
     print("📊 Atualizando Campeões Mensais e Status...")
 
-    # A correção está no UPDATE SET abaixo: `Campeao ` (com espaço entre crases)
+    # nosec: Query interna segura
     query_merge = f"""
     MERGE `{client.project}.{TAB_MENSAL}` T
     USING (
@@ -66,17 +66,17 @@ def atualizar_campeoes_mensais():
     ON T.Rodada = S.Rodada
     WHEN MATCHED THEN
         UPDATE SET 
-            `Campeao ` = S.campeao,  -- CORRIGIDO: Adicionado crase e o espaço que existe na sua tabela
+            `Campeao ` = S.campeao,
             Vice = S.vice,
             Status = S.novo_status,
             DataStatus = S.data_atualizacao
-    """ 
+    """ # nosec
     
     try:
         client.query(query_merge).result()
         print("✅ Tabela Mensal atualizada com sucesso!")
     except Exception as e:
-        print(f"❌ Erro ao  atualizar mensal: {e}")
+        print(f"❌ Erro ao atualizar mensal: {e}")
 
 def criar_view_completa():
     client = get_bq_client()
