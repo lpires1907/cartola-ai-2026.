@@ -1,4 +1,4 @@
-name: CI/CD Tests
+name: Cartola CI/CD Pipeline
 
 on:
   pull_request:
@@ -7,67 +7,70 @@ on:
     branches: [ main, develop ]
 
 jobs:
-  test:
+  quality-check:
+    name: 🐍 Code Quality & Syntax
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ['3.10', '3.11', '3.12']
+        python-version: ['3.12'] # Focado na versão que usamos no projeto
 
     steps:
     - uses: actions/checkout@v3
-    
+
+    # Cache automático para instalar dependências mais rápido
     - name: Set up Python ${{ matrix.python-version }}
       uses: actions/setup-python@v4
       with:
         python-version: ${{ matrix.python-version }}
-    
+        cache: 'pip'
+
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements.txt
-        pip install pylint flake8
-    
-    - name: Lint with flake8
+        # Instala as libs do projeto + ferramentas de teste
+        pip install pandas requests pandas-gbq google-cloud-bigquery db-dtypes pytz gspread gspread-dataframe google-genai
+        pip install flake8 bandit
+
+    - name: 🔍 Check Python Syntax (Compile)
       run: |
-        # Stop the build if there are Python syntax errors or undefined names
-        flake8 *.py --count --select=E9,F63,F7,F82 --show-source --statistics
-        # exit-zero treats all errors as warnings
-        flake8 *.py --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
-      continue-on-error: true
-    
-    - name: Check Python syntax
+        # Tenta compilar todos os arquivos .py para garantir que não há erro de sintaxe
+        # Isso pega erros que o flake8 as vezes deixa passar se mal configurado
+        python -m compileall .
+
+    - name: 🎨 Lint with Flake8
       run: |
-        python -m py_compile coletor.py
-        python -m py_compile app.py
-        python -m py_compile dashboard.py
-      continue-on-error: true
-    
-    - name: Check imports (syntax only)
-      run: |
-        python -c "import ast; ast.parse(open('coletor.py').read()); print('✓ coletor.py syntax OK')"
-        python -c "import ast; ast.parse(open('app.py').read()); print('✓ app.py syntax OK')"
-        python -c "import ast; ast.parse(open('dashboard.py').read()); print('✓ dashboard.py syntax OK')"
-      continue-on-error: true
-    
-    - name: List files
-      run: ls -la
+        # Para o build se houver erros graves de sintaxe (E9, F63, etc)
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        # Avisa sobre estilo, mas não para o build (exit-zero)
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
 
   security-check:
+    name: 🔐 Security Scan
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v3
-    
-    - name: Check for hardcoded secrets
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
+
+    - name: Install Security Tools
+      run: pip install bandit
+
+    - name: 🛡️ Run Bandit (Security Audit)
+      # O Bandit analisa seu código buscando falhas de segurança comuns em Python
+      # -r .  -> Recursivo na pasta atual
+      # -ll   -> Apenas severidade Média e Alta
+      run: bandit -r . -ll
+
+    - name: 🕵️ Check for Hardcoded Secrets (Grep Fallback)
+      # Mantive sua lógica de grep como uma camada extra rápida
       run: |
-        echo "Checking for hardcoded secrets..."
-        ! grep -r "private_key.*-----BEGIN\|BEARER_TOKEN.*eyJ\|api_key.*=.*['\"]" --include="*.py" . && echo "✓ No hardcoded secrets found" || echo "⚠ Check passed (warnings ignored)"
-      continue-on-error: true
-    
-    - name: Verify .gitignore protects secrets
-      run: |
-        if grep -q "secrets.json" .gitignore && grep -q "key" .gitignore; then
-          echo "✓ .gitignore properly protects sensitive files"
+        echo "Checking for obvious hardcoded secrets..."
+        if grep -rE "BEGIN PRIVATE KEY|eyJhbGci|AIza[0-9A-Za-z-_]{35}" --include="*.py" .; then
+          echo "⛔ DANGER: Potential secret key found in code!"
+          exit 1
         else
-          echo "⚠ .gitignore may need updates for secret files"
+          echo "✅ No obvious secrets found."
         fi
-      continue-on-error: true
