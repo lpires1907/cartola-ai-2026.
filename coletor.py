@@ -19,44 +19,29 @@ GCP_JSON = os.getenv('GCP_SERVICE_ACCOUNT')
 COOKIE_SECRET = os.getenv('CARTOLA_GLBID') 
 TIMEOUT = 30 
 
-# --- 1. GERENCIAMENTO DE HEADERS (LÓGICA DE TENTATIVA DUPLA) ---
+# --- 1. GERENCIAMENTO DE HEADERS ---
 def extrair_tokens(cookie_str):
-    """
-    Extrai tanto o GLBID quanto o JWT da string de cookies.
-    Remove aspas e espaços extras para garantir limpeza.
-    """
     tokens = {'GLBID': None, 'JWT': None}
     if not cookie_str: return tokens
     
     try:
-        # Separa por ponto e vírgula e limpa espaços
         partes = [p.strip() for p in cookie_str.split(';') if '=' in p]
-        
         for p in partes:
             key, val = p.split('=', 1)
-            val = val.strip('"').strip("'") # Remove aspas extras se houver
-            
-            # Identifica GLBID (case insensitive)
+            val = val.strip('"').strip("'")
             if key.upper() == 'GLBID' or key == 'glbId':
                 tokens['GLBID'] = val
-            
-            # Identifica JWT
             if key == 'glb_uid_jwt':
                 tokens['JWT'] = val
     except Exception as e:
         print(f"⚠️ Erro ao parsear cookies: {e}")
-        
     return tokens
 
-def get_headers_pro(tipo_token, valor_token, cookie_full):
-    """
-    Gera headers PRO usando um tipo específico de token no X-GLB-Token.
-    """
+def get_base_headers(cookie_full):
     return {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
         'Accept': 'application/json',
-        'Cookie': cookie_full,       
-        'X-GLB-Token': valor_token,
+        'Cookie': cookie_full,
         'Referer': 'https://cartola.globo.com/',
         'Origin': 'https://cartola.globo.com'
     }
@@ -95,32 +80,39 @@ def salvar_bigquery(client, df, tabela, schema):
     client.load_table_from_dataframe(df, f"{client.project}.{tabela}", job_config=job_config).result()
     print(f"✅ Salvo em {tabela}")
 
-# --- 3. API COM RETENTATIVA ---
+# --- 3. API INTELIGENTE (ESTRATÉGIA TRIPLA) ---
 def request_pro_inteligente(url):
-    """
-    Tenta acessar uma URL PRO usando GLBID. Se falhar (401), tenta com JWT.
-    """
     if not COOKIE_SECRET:
         return None, 401
 
     tokens = extrair_tokens(COOKIE_SECRET)
-    
-    # TENTATIVA 1: Usando GLBID (Padrão mais comum)
-    if tokens['GLBID']:
-        headers = get_headers_pro('GLBID', tokens['GLBID'], COOKIE_SECRET)
-        res = requests.get(url, headers=headers, timeout=TIMEOUT)
-        if res.status_code == 200:
-            return res, 200
-        print(f"🔸 Tentativa com GLBID falhou ({res.status_code})...")
+    headers_base = get_base_headers(COOKIE_SECRET)
 
-    # TENTATIVA 2: Usando JWT (Alternativa PRO)
+    # ESTRATÉGIA 1: GLBID no Header X-GLB-Token (Clássico)
+    if tokens['GLBID']:
+        h1 = headers_base.copy()
+        h1['X-GLB-Token'] = tokens['GLBID']
+        res = requests.get(url, headers=h1, timeout=TIMEOUT)
+        if res.status_code == 200: return res, 200
+
+    # ESTRATÉGIA 2: JWT no Header X-GLB-Token (Moderno Web)
     if tokens['JWT']:
-        headers = get_headers_pro('JWT', tokens['JWT'], COOKIE_SECRET)
-        res = requests.get(url, headers=headers, timeout=TIMEOUT)
-        if res.status_code == 200:
-            print("🔹 Tentativa com JWT funcionou!")
+        h2 = headers_base.copy()
+        h2['X-GLB-Token'] = tokens['JWT']
+        res = requests.get(url, headers=h2, timeout=TIMEOUT)
+        if res.status_code == 200: 
+            print("🔹 Sucesso com X-GLB-Token: JWT")
             return res, 200
-        print(f"🔸 Tentativa com JWT falhou ({res.status_code})...")
+
+    # ESTRATÉGIA 3: JWT no Header Authorization (Padrão API/Mobile)
+    if tokens['JWT']:
+        h3 = headers_base.copy()
+        h3['Authorization'] = f"Bearer {tokens['JWT']}"
+        h3['x-glb-auth'] = 'oidc' # Header auxiliar comum na Globo
+        res = requests.get(url, headers=h3, timeout=TIMEOUT)
+        if res.status_code == 200: 
+            print("🔹 Sucesso com Authorization: Bearer JWT")
+            return res, 200
     
     return None, 401
 
@@ -130,12 +122,11 @@ def get_dados_time_smart(time_id, rodada, is_live):
     url = url_parcial if is_live else url_oficial
     
     try:
-        # Tenta acesso PRO com retentativa
         res, status = request_pro_inteligente(url)
         if res and status == 200:
             return res.json()
         
-        # Fallback Público (sem cookies)
+        # Fallback Público
         res = requests.get(url, headers=get_public_headers(), timeout=TIMEOUT)
         return res.json() if res.status_code == 200 else {'pontos': 0, 'atletas': []}
     except: return {'pontos': 0, 'atletas': []}
@@ -146,7 +137,7 @@ def rodar_coleta():
         print("⚠️ AVISO: Variável CARTOLA_GLBID vazia.")
     else:
         tokens = extrair_tokens(COOKIE_SECRET)
-        print(f"🍪 Cookies carregados. GLBID encontrado? {'✅' if tokens['GLBID'] else '❌'} | JWT encontrado? {'✅' if tokens['JWT'] else '❌'}")
+        print(f"🍪 Cookies carregados. GLBID: {'✅' if tokens['GLBID'] else '❌'} | JWT: {'✅' if tokens['JWT'] else '❌'}")
     
     client = get_bq_client()
     garantir_dataset(client)
@@ -166,38 +157,33 @@ def rodar_coleta():
     rodada_alvo = rodada_cartola if is_live else (rodada_cartola - 1)
     print(f"🔄 Rodada Alvo: {rodada_alvo} ({tipo_dado})")
 
-    # 2. Teste de Autenticação (Diagnóstico)
-    print("🕵️ Testando credenciais...")
-    res_me, status_me = request_pro_inteligente("https://api.cartola.globo.com/auth/time")
-    if status_me == 200:
-        print("✅ Credenciais PRO VÁLIDAS! Acesso confirmado.")
-    else:
-        print("⚠️ Credenciais PRO REJEITADAS. O acesso à liga privada provavelmente falhará.")
-
-    # 3. Metadados
+    # 2. Metadados
     try:
         res_clubes = requests.get("https://api.cartola.globo.com/clubes", headers=get_public_headers(), timeout=TIMEOUT).json()
         posicoes = {'1': 'Goleiro', '2': 'Lateral', '3': 'Zagueiro', '4': 'Meia', '5': 'Atacante', '6': 'Técnico'}
     except: posicoes = {}
 
-    # 4. BUSCA DA LIGA
+    # 3. BUSCA DA LIGA
     print(f"🌍 Tentando acessar dados da liga: {LIGA_SLUG}")
     
-    # Tenta via PRO (com retentativa interna)
     url_auth = f"https://api.cartola.globo.com/auth/liga/{LIGA_SLUG}"
     res_liga, status_liga = request_pro_inteligente(url_auth)
     
     if status_liga == 200:
         print("✅ Acesso via rota PRO (/auth/liga) funcionou!")
     else:
-        print(f"⚠️ Rota PRO falhou. Tentando rota pública (fallback)...")
-        # Fallback público
-        url_pub = f"https://api.cartola.globo.com/liga/{LIGA_SLUG}"
-        res_liga = requests.get(url_pub, headers=get_public_headers(), timeout=TIMEOUT)
+        print(f"⚠️ Todas as tentativas PRO falharam. Bloqueio de IP suspeito. Tentando rota pública...")
+        try:
+            url_pub = f"https://api.cartola.globo.com/liga/{LIGA_SLUG}"
+            res_liga = requests.get(url_pub, headers=get_public_headers(), timeout=TIMEOUT)
+        except Exception as e:
+            print(f"❌ Erro na rota pública: {e}")
+            res_liga = None
 
     if res_liga is None or res_liga.status_code != 200:
         code = res_liga.status_code if res_liga else 'N/A'
         print(f"❌ Erro final ao acessar liga: {code}")
+        if code == 500: print("👉 Erro 500 na pública confirma: a liga é privada e exige Auth.")
         return
 
     times_liga = res_liga.json().get('times', [])
