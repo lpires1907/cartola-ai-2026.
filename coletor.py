@@ -18,31 +18,36 @@ TAB_ATLETAS = f"{DATASET_ID}.atletas_globais"
 # Variáveis globais
 BEARER_TOKEN = None
 GCP_JSON = os.getenv('GCP_SERVICE_ACCOUNT')
-
-# Timeout padrão para evitar travamentos
-TIMEOUT = 20
+TIMEOUT = 30 # Timeout para evitar travamento do Bandit/Actions
 
 # --- 1. AUTENTICAÇÃO DINÂMICA ---
 def buscar_token_automatico():
     email = os.getenv('CARTOLA_EMAIL')
     senha = os.getenv('CARTOLA_SENHA')
+    
+    # Se não tiver credenciais, retorna None e o script tentará modo público
     if not email or not senha:
-        print("⚠️ Secrets de Login não encontrados. Tentaremos acesso público.")
+        print("⚠️ CARTOLA_EMAIL/SENHA não definidos. Tentaremos acesso público.")
         return None
 
-    print("🔐 Renovando Token...")
+    print("🔐 Renovando Token de Acesso...")
     try:
         payload = {"payload": {"email": email, "password": senha, "serviceId": 438}}
+        # Autentica na Globo
         res = requests.post("https://login.globo.com/api/authentication", json=payload, timeout=TIMEOUT)
         res.raise_for_status()
         glb_id = res.json().get('glbId')
         
+        # Pega Token do Cartola
         headers_auth = {'Cookie': f'glbId={glb_id}'}
         res_auth = requests.get("https://api.cartola.globo.com/auth/token", headers=headers_auth, timeout=TIMEOUT)
         res_auth.raise_for_status()
-        return res_auth.json().get('token')
+        
+        token = res_auth.json().get('token')
+        print("✅ Token renovado com sucesso!")
+        return token
     except Exception as e:
-        print(f"⚠️ Falha no login ({e}). Tentaremos acesso público.")
+        print(f"⚠️ Falha no login automático: {e}")
         return None
 
 # --- 2. INFRAESTRUTURA ---
@@ -58,9 +63,8 @@ def garantir_dataset(client):
 
 def limpar_dados_rodada(client, rodada):
     print(f"🧹 Limpando dados da Rodada {rodada}...")
-    # nosec: BigQuery table deletion
+    # nosec: BigQuery table name injection safe here
     sqls = [f"DELETE FROM `{client.project}.{t}` WHERE rodada = {rodada}" for t in [TAB_HISTORICO, TAB_ESCALACOES, TAB_ATLETAS]] # nosec
-    
     for sql in sqls:
         try: client.query(sql).result()
         except: pass
@@ -80,56 +84,84 @@ def get_headers():
     return headers
 
 def get_dados_time_smart(time_id, rodada, is_live):
+    # Define URL (Parcial ou Oficial)
     url = f"https://api.cartola.globo.com/time/parcial/{time_id}" if is_live else f"https://api.cartola.globo.com/time/id/{time_id}/{rodada}"
+    
     try:
+        # Tenta com os headers atuais (com ou sem token)
         res = requests.get(url, headers=get_headers(), timeout=TIMEOUT)
+        
+        # SUCESSO
         if res.status_code == 200: return res.json()
         
+        # ERRO 401 (Token inválido ou expirado) -> Tenta fallback público
         if res.status_code == 401:
+            # Tenta sem token (modo visitante)
             res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=TIMEOUT)
             return res.json() if res.status_code == 200 else {'pontos': 0, 'atletas': []}
             
         return {'pontos': 0, 'atletas': []}
     except: return {'pontos': 0, 'atletas': []}
 
-# --- 4. EXECUÇÃO ---
+# --- 4. EXECUÇÃO PRINCIPAL ---
 def rodar_coleta():
     global BEARER_TOKEN
+    
+    # 1. Tenta obter token (Login)
     BEARER_TOKEN = buscar_token_automatico()
     
     client = get_bq_client()
     garantir_dataset(client)
 
-    # Verifica status
-    status_api = requests.get("https://api.cartola.globo.com/mercado/status", headers={'User-Agent': 'Mozilla/5.0'}, timeout=TIMEOUT).json()
+    # 2. Verifica status do mercado (Público)
+    try:
+        status_api = requests.get("https://api.cartola.globo.com/mercado/status", headers={'User-Agent': 'Mozilla/5.0'}, timeout=TIMEOUT).json()
+    except Exception as e:
+        print(f"❌ Erro fatal ao checar mercado: {e}")
+        return
+
     mercado_status = status_api.get('status_mercado', 1) 
     rodada_cartola = status_api.get('rodada_atual', 0)
     game_over = status_api.get('game_over', False)
     
     is_live = (mercado_status == 2)
+    # Regra: Se mercado fechado e jogo acabou = Previa. Se aberto = Oficial da anterior.
     tipo_dado = "PREVIA" if (is_live and game_over) else ("PARCIAL" if is_live else "OFICIAL")
     rodada_alvo = rodada_cartola if is_live else (rodada_cartola - 1)
 
     print(f"🔄 Rodada Alvo: {rodada_alvo} ({tipo_dado})")
 
-    # Coleta de metadados
+    # 3. Coleta Metadados (Público)
     try:
-        clubes = {str(id): t['nome'] for id, t in requests.get("https://api.cartola.globo.com/clubes", headers={'User-Agent': 'Mozilla/5.0'}, timeout=TIMEOUT).json().items()}
+        res_clubes = requests.get("https://api.cartola.globo.com/clubes", headers={'User-Agent': 'Mozilla/5.0'}, timeout=TIMEOUT).json()
+        clubes = {str(id): t['nome'] for id, t in res_clubes.items()}
         posicoes = {'1': 'Goleiro', '2': 'Lateral', '3': 'Zagueiro', '4': 'Meia', '5': 'Atacante', '6': 'Técnico'}
     except: clubes, posicoes = {}, {}
 
-    print("🌍 Tentando acessar API Pública da Liga...")
-    url_liga = f"https://api.cartola.globo.com/liga/{LIGA_SLUG}"
-    res_liga = requests.get(url_liga, headers={'User-Agent': 'Mozilla/5.0'}, timeout=TIMEOUT)
+    # 4. BUSCA DA LIGA (Lógica Híbrida: Público -> Autenticado)
+    print(f"🌍 Tentando acessar dados da liga: {LIGA_SLUG}")
     
-    if res_liga.status_code in [401, 403, 404]:
-        print(f"⚠️ Acesso público falhou ({res_liga.status_code}). Tentando acesso Autenticado...")
-        url_liga = f"https://api.cartola.globo.com/auth/liga/{LIGA_SLUG}"
-        res_liga = requests.get(url_liga, headers=get_headers(), timeout=TIMEOUT)
+    # TENTATIVA 1: Endpoint Público (Não precisa de login)
+    url_publica = f"https://api.cartola.globo.com/liga/{LIGA_SLUG}"
+    res_liga = requests.get(url_publica, headers={'User-Agent': 'Mozilla/5.0'}, timeout=TIMEOUT)
+    
+    if res_liga.status_code == 200:
+        print("✅ Acesso via API Pública funcionou!")
+    
+    # TENTATIVA 2: Endpoint Autenticado (Se o público falhar com 401/403/404)
+    else:
+        print(f"⚠️ API Pública retornou {res_liga.status_code}. Tentando API Autenticada...")
+        
+        if not BEARER_TOKEN:
+            print("❌ Erro: Liga privada requer login, mas o Token não foi gerado. Verifique CARTOLA_EMAIL/SENHA.")
+            return
 
-    if res_liga.status_code != 200:
-        print(f"❌ Erro fatal ao acessar liga: {res_liga.status_code}")
-        return
+        url_privada = f"https://api.cartola.globo.com/auth/liga/{LIGA_SLUG}"
+        res_liga = requests.get(url_privada, headers=get_headers(), timeout=TIMEOUT)
+        
+        if res_liga.status_code != 200:
+            print(f"❌ Erro fatal: Não foi possível acessar a liga nem com login. Código: {res_liga.status_code}")
+            return
 
     times_liga = res_liga.json().get('times', [])
     ts_agora = datetime.now(pytz.timezone('America/Sao_Paulo'))
@@ -139,8 +171,11 @@ def rodar_coleta():
 
     for time_obj in times_liga:
         nome_time = time_obj['nome']
+        
+        # Dados detalhados do time (Escalação)
         dados_time = get_dados_time_smart(time_obj['time_id'], rodada_alvo, is_live)
         
+        # Pega pontuação total (fallback para 0.0 se falhar)
         pontos_totais = float(dados_time.get('pontos', time_obj.get('pontos', {}).get('rodada', 0.0)))
         
         l_hist.append({
@@ -158,6 +193,7 @@ def rodar_coleta():
                 'status_rodada': tipo_dado, 'timestamp': ts_agora
             })
 
+    # Carga no Banco
     if l_hist:
         limpar_dados_rodada(client, rodada_alvo)
         
@@ -167,7 +203,7 @@ def rodar_coleta():
         s_esc = [bigquery.SchemaField("rodada", "INTEGER"), bigquery.SchemaField("liga_time_nome", "STRING"), bigquery.SchemaField("pontos", "FLOAT"), bigquery.SchemaField("is_capitao", "BOOLEAN"), bigquery.SchemaField("timestamp", "TIMESTAMP")]
         salvar_bigquery(client, pd.DataFrame(l_esc), TAB_ESCALACOES, s_esc)
 
-    print("🏁 Coleta finalizada.")
+    print("🏁 Coleta finalizada com sucesso.")
 
 if __name__ == "__main__":
     rodar_coleta()
