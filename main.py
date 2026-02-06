@@ -1,8 +1,8 @@
 import sys
 from coletor import rodar_coleta
-from processamento import rodar_processamento # <--- NOVO IMPORT
+from processamento import rodar_processamento
 from narrador import rodar_narracao
-from exportador import rodar_exportacao
+# from exportador import rodar_exportacao  <-- COMENTADO (ou apagado)
 
 def main():
     print("🚀 INICIANDO PIPELINE CARTOLA ANALYTICS")
@@ -12,14 +12,13 @@ def main():
         rodar_coleta()
         
         # 2. Processamento (View e Tabela Mensal)
-        # Importante rodar aqui para que o Narrador e o App já peguem os campeões mensais atualizados
         rodar_processamento()
         
         # 3. Inteligência
         rodar_narracao()
         
         # 4. Distribuição
-        rodar_exportacao()
+        # rodar_exportacao()  <-- COMENTADO (ou apagado)
         
         print("✅ Pipeline executada com sucesso!")
         
