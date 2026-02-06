@@ -26,7 +26,7 @@ def buscar_token_automatico():
     senha = os.getenv('CARTOLA_SENHA')
     
     if not email or not senha:
-        print("⚠️ CARTOLA_EMAIL/SENHA não definidos. Tentaremos acesso público.")
+        print("⚠️ CARTOLA_EMAIL/SENHA não definidos.  Tentaremos acesso público.")
         return None
 
     print("🔐 Renovando Token de Acesso...")

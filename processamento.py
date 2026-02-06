@@ -76,7 +76,7 @@ def atualizar_campeoes_mensais():
         client.query(query_merge).result()
         print("✅ Tabela Mensal atualizada com sucesso!")
     except Exception as e:
-        print(f"❌ Erro ao atualizar mensal: {e}")
+        print(f"❌ Erro ao  atualizar mensal: {e}")
 
 def criar_view_completa():
     client = get_bq_client()
