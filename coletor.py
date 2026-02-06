@@ -20,57 +20,60 @@ BEARER_TOKEN = None
 GCP_JSON = os.getenv('GCP_SERVICE_ACCOUNT')
 TIMEOUT = 30 # Timeout para evitar travamento do Bandit/Actions
 
-# --- 1. AUTENTICAÇÃO DINÂMICA ---
+# --- 1. AUTENTICAÇÃO HÍBRIDA (COOKIE OU LOGIN) ---
 def buscar_token_automatico():
+    # Tenta pegar primeiro o Cookie direto (Mais estável)
+    cookie_glb_id = os.getenv('CARTOLA_GLBID')
+    
+    # Se não tiver cookie, tenta user/senha (Legado/Fallback)
     email = os.getenv('CARTOLA_EMAIL')
     senha = os.getenv('CARTOLA_SENHA')
     
+    token_cartola = None
+
+    # ESTRATÉGIA A: Usar Cookie glbId (Recomendado)
+    if cookie_glb_id:
+        print("🍪 Usando Cookie GLBID fornecido via Secrets...")
+        try:
+            headers_token = {
+                'Cookie': f'glbId={cookie_glb_id}',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            }
+            res = requests.get("https://api.cartola.globo.com/auth/token", headers=headers_token, timeout=TIMEOUT)
+            res.raise_for_status()
+            token_cartola = res.json().get('token')
+            print("✅ Token renovado via Cookie com sucesso!")
+            return token_cartola
+        except Exception as e:
+            print(f"⚠️ Falha ao renovar via Cookie: {e}. Tentando login user/senha...")
+    
+    # ESTRATÉGIA B: Login com User/Senha (Se o cookie falhar ou não existir)
     if not email or not senha:
-        print("⚠️ CARTOLA_EMAIL/SENHA não definidos. Tentaremos acesso público.")
+        print("⚠️ Sem credenciais de login. Tentaremos acesso público.")
         return None
 
-    print("🔐 Renovando Token de Acesso...")
+    print("🔐 Tentando login via Email/Senha...")
     try:
         payload = {"payload": {"email": email, "password": senha, "serviceId": 438}}
-        
-        # HEADERS BLINDADOS (Simulando Chrome Real)
         auth_headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
             "Content-Type": "application/json",
             "Accept": "*/*",
             "Origin": "https://login.globo.com",
-            "Referer": "https://login.globo.com/login/438",
-            "Connection": "keep-alive"
+            "Referer": "https://login.globo.com/login/438"
         }
-
-        # Autentica na Globo
-        res = requests.post(
-            "https://login.globo.com/api/authentication", 
-            json=payload, 
-            headers=auth_headers, 
-            timeout=TIMEOUT
-        )
+        res = requests.post("https://login.globo.com/api/authentication", json=payload, headers=auth_headers, timeout=TIMEOUT)
         res.raise_for_status()
-        glb_id = res.json().get('glbId')
+        novo_glb_id = res.json().get('glbId')
         
-        # Pega Token do Cartola
-        token_headers = {
-            'Cookie': f'glbId={glb_id}',
-            'User-Agent': auth_headers['User-Agent'],
-            'Accept': 'application/json'
-        }
-        res_auth = requests.get(
-            "https://api.cartola.globo.com/auth/token", 
-            headers=token_headers, 
-            timeout=TIMEOUT
-        )
+        headers_token = {'Cookie': f'glbId={novo_glb_id}', 'User-Agent': auth_headers['User-Agent']}
+        res_auth = requests.get("https://api.cartola.globo.com/auth/token", headers=headers_token, timeout=TIMEOUT)
         res_auth.raise_for_status()
         
-        token = res_auth.json().get('token')
-        print("✅ Token renovado com sucesso!")
-        return token
+        print("✅ Token renovado via Login com sucesso!")
+        return res_auth.json().get('token')
     except Exception as e:
-        print(f"⚠️ Falha no login automático: {e}")
+        print(f"❌ Falha crítica no login: {e}")
         return None
 
 # --- 2. INFRAESTRUTURA ---
