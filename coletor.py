@@ -25,8 +25,8 @@ TIMEOUT = 30
 def get_headers():
     """
     Gera os headers de autenticação.
-    Prioridade 1: Bearer Token (se existir)
-    Prioridade 2: Cookie glbId (se existir)
+    Prioridade 1: Bearer Token (se existir e for novo)
+    Prioridade 2: Cookie glbId (se existir, usa direto)
     """
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
@@ -44,9 +44,9 @@ def get_headers():
 def buscar_token_automatico():
     """
     Tenta gerar um Bearer Token novo. 
-    Se falhar (404/406), retorna None, mas o código seguirá usando o Cookie via get_headers().
+    Se falhar, retorna None, mas o código seguirá usando o Cookie via get_headers().
     """
-    # 1. Tenta renovar usando o Cookie (Troca Ticket)
+    # 1. Tenta renovar usando o Cookie
     if GLBID_SECRET:
         print("🍪 Tentando renovar Token usando Cookie GLBID...")
         try:
@@ -61,13 +61,13 @@ def buscar_token_automatico():
                 print("✅ Token Bearer gerado com sucesso!")
                 return res.json().get('token')
             else:
-                print(f"⚠️ API de Token retornou {res.status_code}. Seguiremos usando o Cookie direto.")
+                print(f"⚠️ API de Token retornou {res.status_code}. Seguiremos usando o Cookie direto (Isso é normal).")
                 return None
         except Exception as e:
             print(f"⚠️ Erro ao tentar renovar token: {e}. Seguiremos usando o Cookie direto.")
             return None
 
-    # 2. Login com User/Senha (Último caso - geralmente falha com 406 no Actions)
+    # 2. Login com User/Senha (Fallback)
     email = os.getenv('CARTOLA_EMAIL')
     senha = os.getenv('CARTOLA_SENHA')
     
@@ -78,8 +78,7 @@ def buscar_token_automatico():
             h_login = {'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0'}
             res = requests.post("https://login.globo.com/api/authentication", json=payload, headers=h_login, timeout=TIMEOUT)
             res.raise_for_status()
-            print("✅ Login realizado! (Nota: Isso é raro em servidores cloud)")
-            return None # Retornaria token aqui se a lógica de login fosse completa, mas o cookie é preferível.
+            return None 
         except:
             print("❌ Login User/Senha falhou (Normal devido a proteção anti-bot).")
     
@@ -88,12 +87,10 @@ def buscar_token_automatico():
 # --- 2. INFRAESTRUTURA ---
 def get_bq_client():
     if not GCP_JSON: raise ValueError("GCP_SERVICE_ACCOUNT ausente.")
-    # Tenta ler como JSON string ou Dict direto
     try:
         info = json.loads(GCP_JSON) if isinstance(GCP_JSON, str) else GCP_JSON
     except:
         info = GCP_JSON 
-        
     creds = service_account.Credentials.from_service_account_info(info)
     return bigquery.Client(credentials=creds, project=info['project_id'])
 
@@ -138,10 +135,6 @@ def rodar_coleta():
     # 1. Tenta autenticação (mas não morre se falhar)
     BEARER_TOKEN = buscar_token_automatico()
     
-    # Validação de segurança: Temos alguma credencial?
-    if not BEARER_TOKEN and not GLBID_SECRET:
-        print("⚠️ AVISO: Sem Token Bearer e sem Cookie GLBID. Acesso a ligas privadas falhará.")
-    
     client = get_bq_client()
     garantir_dataset(client)
 
@@ -173,7 +166,6 @@ def rodar_coleta():
     print(f"🌍 Tentando acessar dados da liga: {LIGA_SLUG}")
     
     # Tenta direto a API Privada usando a autenticação melhorada
-    # (A URL /auth/liga é a mais segura para garantir que pegamos dados completos)
     url_liga = f"https://api.cartola.globo.com/auth/liga/{LIGA_SLUG}"
     res_liga = requests.get(url_liga, headers=get_headers(), timeout=TIMEOUT)
     
@@ -184,10 +176,19 @@ def rodar_coleta():
         res_liga = requests.get(url_liga, headers={'User-Agent': 'Mozilla/5.0'}, timeout=TIMEOUT)
 
     if res_liga.status_code != 200:
-        print(f"❌ Erro fatal: Não foi possível acessar a liga. Status: {res_liga.status_code}")
-        # Dica de debug
-        if res_liga.status_code == 404: print("👉 Verifique se o SLUG da liga está correto.")
-        return
+        # CORREÇÃO CRÍTICA AQUI:
+        # Só falha se não tivermos nem Token E nem Cookie
+        if not BEARER_TOKEN and not GLBID_SECRET:
+             print("❌ Erro: Liga privada requer login, e não temos nem Token nem Cookie.")
+             return
+        
+        # Se tivermos Cookie, tentamos novamente forçando os headers na url de auth
+        print("🔄 Tentando novamente endpoint autenticado com Cookie direto...")
+        res_liga = requests.get(f"https://api.cartola.globo.com/auth/liga/{LIGA_SLUG}", headers=get_headers(), timeout=TIMEOUT)
+        
+        if res_liga.status_code != 200:
+             print(f"❌ Erro fatal: Não foi possível acessar a liga. Status: {res_liga.status_code}")
+             return
 
     times_liga = res_liga.json().get('times', [])
     ts_agora = datetime.now(pytz.timezone('America/Sao_Paulo'))
