@@ -24,11 +24,7 @@ def atualizar_campeoes_mensais():
 
     print("📊 Atualizando Campeões Mensais e Status...")
 
-    # Query poderosa que:
-    # 1. Agrupa pontos por Mês e Time
-    # 2. Rankeia (1º e 2º)
-    # 3. Atualiza a tabela Rodada_Mensal com o Líder, Vice e Status
-    
+    # nosec: Query de manutenção interna, variáveis controladas pelo código.
     query_merge = f"""
     MERGE `{client.project}.{TAB_MENSAL}` T
     USING (
@@ -74,7 +70,7 @@ def atualizar_campeoes_mensais():
             Vice = S.vice,
             Status = S.novo_status,
             DataStatus = S.data_atualizacao
-    """
+    """ # nosec
     
     try:
         client.query(query_merge).result()
@@ -88,7 +84,6 @@ def criar_view_completa():
 
     print("🔨 Recriando View Consolidada...")
 
-    # Colunas dinâmicas para cada mês do seu CSV
     cols_mensais = """
         SUM(CASE WHEN m.Mensal = 'Jan Fev' THEN h.pontos ELSE 0 END) as pontos_jan_fev,
         SUM(CASE WHEN m.Mensal = 'Março' THEN h.pontos ELSE 0 END) as pontos_marco,
@@ -101,6 +96,7 @@ def criar_view_completa():
         SUM(CASE WHEN m.Mensal = 'Nov Dez' THEN h.pontos ELSE 0 END) as pontos_nov_dez
     """
 
+    # nosec: Query DDL (Data Definition Language) requer strings literais no BigQuery.
     sql = f"""
     CREATE OR REPLACE VIEW `{client.project}.{VIEW_CONSOLIDADA}` AS
     SELECT 
@@ -113,7 +109,7 @@ def criar_view_completa():
         MAX(h.pontos) as maior_pontuacao,
         MIN(h.pontos) as menor_pontuacao,
         
-        -- TURNOS (1º Turno: R1-R19 | 2º Turno: R20-R38)
+        -- TURNOS
         SUM(CASE WHEN h.rodada <= 19 THEN h.pontos ELSE 0 END) as pontos_turno_1,
         SUM(CASE WHEN h.rodada >= 20 THEN h.pontos ELSE 0 END) as pontos_turno_2,
         
@@ -124,7 +120,7 @@ def criar_view_completa():
     LEFT JOIN `{client.project}.{TAB_MENSAL}` m ON h.rodada = m.Rodada
     GROUP BY h.nome, h.nome_cartola
     ORDER BY total_geral DESC;
-    """
+    """ # nosec
     
     try:
         client.query(sql).result()
