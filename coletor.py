@@ -24,10 +24,13 @@ TIMEOUT = 30
 def get_headers():
     """
     Usa o Cookie glbId para autenticação.
+    Adicionado Referer e Origin para simular navegador real.
     """
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-        'Accept': 'application/json'
+        'Accept': 'application/json',
+        'Referer': 'https://cartola.globo.com/',
+        'Origin': 'https://cartola.globo.com'
     }
     
     if GLBID_SECRET:
@@ -51,7 +54,7 @@ def garantir_dataset(client):
 
 def limpar_dados_rodada(client, rodada):
     print(f"🧹 Limpando dados da Rodada {rodada}...")
-    # O comentário '# nosec' deve ficar EXATAMENTE nesta linha:
+    # nosec: Lista definida internamente
     sqls = [f"DELETE FROM `{client.project}.{t}` WHERE rodada = {rodada}" for t in [TAB_HISTORICO, TAB_ESCALACOES, TAB_ATLETAS]] # nosec
     for sql in sqls:
         try: client.query(sql).result()
@@ -65,16 +68,16 @@ def salvar_bigquery(client, df, tabela, schema):
 
 # --- 3. API INTELIGENTE ---
 def get_dados_time_smart(time_id, rodada, is_live):
-    # Usa endpoint PARCIAL se estiver ao vivo, senão usa ID/RODADA
     url = f"https://api.cartola.globo.com/time/parcial/{time_id}" if is_live else f"https://api.cartola.globo.com/time/id/{time_id}/{rodada}"
     try:
+        # Tenta com headers completos (Cookie)
         res = requests.get(url, headers=get_headers(), timeout=TIMEOUT)
         
         if res.status_code == 200: return res.json()
         
-        # Fallback se der erro
-        if res.status_code in [401, 403, 404]:
-            # Tenta sem cookie (modo público)
+        # Fallback se der erro de permissão ou não encontrado
+        if res.status_code in [401, 403, 404, 500]:
+            # Tenta sem cookie (modo público/anônimo) para evitar conflito
             res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=TIMEOUT)
             return res.json() if res.status_code == 200 else {'pontos': 0, 'atletas': []}
             
@@ -108,27 +111,29 @@ def rodar_coleta():
 
     print(f"🔄 Rodada Alvo: {rodada_alvo} ({tipo_dado})")
 
-    # 2. Metadados (Clubes e Posições)
+    # 2. Metadados
     try:
         res_clubes = requests.get("https://api.cartola.globo.com/clubes", headers={'User-Agent': 'Mozilla/5.0'}, timeout=TIMEOUT).json()
         posicoes = {'1': 'Goleiro', '2': 'Lateral', '3': 'Zagueiro', '4': 'Meia', '5': 'Atacante', '6': 'Técnico'}
     except: posicoes = {}
 
-    # 3. BUSCA DA LIGA (Lógica Corrigida para evitar Erro 500)
+    # 3. BUSCA DA LIGA
     print(f"🌍 Tentando acessar dados da liga: {LIGA_SLUG}")
     
-    # TENTATIVA 1: Rota Autenticada (Prioridade para quem tem Cookie)
+    # TENTATIVA 1: Rota Autenticada (COM COOKIE)
     url_auth = f"https://api.cartola.globo.com/auth/liga/{LIGA_SLUG}"
     res_liga = requests.get(url_auth, headers=get_headers(), timeout=TIMEOUT)
     
     if res_liga.status_code == 200:
         print("✅ Acesso via rota autenticada (/auth/liga) funcionou!")
     else:
-        print(f"⚠️ Rota /auth/liga retornou {res_liga.status_code}. Tentando rota pública...")
+        print(f"⚠️ Rota autenticada retornou {res_liga.status_code}. Tentando rota pública (anônima)...")
         
-        # TENTATIVA 2: Rota Pública (Fallback)
+        # TENTATIVA 2: Rota Pública (SEM COOKIE - CORREÇÃO CRÍTICA)
+        # Se enviarmos o cookie para a rota pública, dá erro 500.
+        # Aqui enviamos apenas um User-Agent limpo.
         url_pub = f"https://api.cartola.globo.com/liga/{LIGA_SLUG}"
-        res_liga = requests.get(url_pub, headers=get_headers(), timeout=TIMEOUT)
+        res_liga = requests.get(url_pub, headers={'User-Agent': 'Mozilla/5.0'}, timeout=TIMEOUT)
 
     # Se ambas falharem
     if res_liga.status_code != 200:
@@ -149,12 +154,9 @@ def rodar_coleta():
 
     for time_obj in times_liga:
         nome_time = time_obj['nome']
-        
-        # Busca dados detalhados (Parciais ou Oficiais)
         dados_time = get_dados_time_smart(time_obj['time_id'], rodada_alvo, is_live)
         
         pts = dados_time.get('pontos')
-        # Fallback se a pontuação vier nula
         if pts is None: pts = time_obj.get('pontos', {}).get('rodada', 0.0)
         
         l_hist.append({
@@ -172,7 +174,6 @@ def rodar_coleta():
                 'status_rodada': tipo_dado, 'timestamp': ts_agora
             })
 
-    # Carga no Banco (Se tiver dados)
     if l_hist:
         limpar_dados_rodada(client, rodada_alvo)
         
