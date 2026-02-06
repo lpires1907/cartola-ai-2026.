@@ -16,39 +16,42 @@ TAB_ESCALACOES = f"{DATASET_ID}.times_escalacoes"
 TAB_ATLETAS = f"{DATASET_ID}.atletas_globais"
 
 GCP_JSON = os.getenv('GCP_SERVICE_ACCOUNT')
-COOKIE_SECRET = os.getenv('CARTOLA_GLBID') 
+# ATENÇÃO: Agora esta variável deve conter o TOKEN BEARER (o código que começa com eyJ...)
+TOKEN_SECRET = os.getenv('CARTOLA_GLBID') 
 TIMEOUT = 30 
 
-# --- 1. GERENCIAMENTO DE HEADERS ---
-def extrair_tokens(cookie_str):
-    tokens = {'GLBID': None, 'JWT': None}
-    if not cookie_str: return tokens
-    
-    try:
-        partes = [p.strip() for p in cookie_str.split(';') if '=' in p]
-        for p in partes:
-            key, val = p.split('=', 1)
-            val = val.strip('"').strip("'")
-            if key.upper() == 'GLBID' or key == 'glbId':
-                tokens['GLBID'] = val
-            if key == 'glb_uid_jwt':
-                tokens['JWT'] = val
-    except Exception as e:
-        print(f"⚠️ Erro ao parsear cookies: {e}")
-    return tokens
+# --- 1. GERENCIAMENTO DE HEADERS (MODO OIDC) ---
+def get_pro_headers():
+    """
+    Replica exatamente os headers do cURL capturado.
+    """
+    if not TOKEN_SECRET:
+        return None
 
-def get_base_headers(cookie_full):
+    # Tratamento: Se o usuário colou "Bearer eyJ...", removemos o "Bearer " duplicado
+    token_limpo = TOKEN_SECRET.replace("Bearer ", "").strip()
+    
+    # Remove aspas se houver
+    token_limpo = token_limpo.strip('"').strip("'")
+
     return {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-        'Accept': 'application/json',
-        'Cookie': cookie_full,
-        'Referer': 'https://cartola.globo.com/',
-        'Origin': 'https://cartola.globo.com'
+        'authority': 'api.cartola.globo.com',
+        'accept': 'application/json',
+        'accept-language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+        'authorization': f'Bearer {token_limpo}',  # O Segredo aqui!
+        'origin': 'https://cartola.globo.com',
+        'referer': 'https://cartola.globo.com/',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'x-glb-app': 'cartola_web',  # CRUCIAL: Identifica a aplicação
+        'x-glb-auth': 'oidc',        # CRUCIAL: Tipo de auth
+        'sec-fetch-site': 'same-site',
+        'sec-fetch-mode': 'cors',
+        'sec-fetch-dest': 'empty'
     }
 
 def get_public_headers():
     return {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
         'Accept': 'application/json'
     }
 
@@ -68,8 +71,8 @@ def garantir_dataset(client):
 
 def limpar_dados_rodada(client, rodada):
     print(f"🧹 Limpando dados da Rodada {rodada}...")
-    # nosec: Query interna segura
-    sqls = [f"DELETE FROM `{client.project}.{t}` WHERE rodada = {rodada}" for t in [TAB_HISTORICO, TAB_ESCALACOES, TAB_ATLETAS]] # nosec
+    # nosec
+    sqls = [f"DELETE FROM `{client.project}.{t}` WHERE rodada = {rodada}" for t in [TAB_HISTORICO, TAB_ESCALACOES, TAB_ATLETAS]] 
     for sql in sqls:
         try: client.query(sql).result()
         except: pass
@@ -80,51 +83,18 @@ def salvar_bigquery(client, df, tabela, schema):
     client.load_table_from_dataframe(df, f"{client.project}.{tabela}", job_config=job_config).result()
     print(f"✅ Salvo em {tabela}")
 
-# --- 3. API INTELIGENTE (ESTRATÉGIA TRIPLA) ---
-def request_pro_inteligente(url):
-    if not COOKIE_SECRET:
-        return None, 401
-
-    tokens = extrair_tokens(COOKIE_SECRET)
-    headers_base = get_base_headers(COOKIE_SECRET)
-
-    # ESTRATÉGIA 1: GLBID no Header X-GLB-Token (Clássico)
-    if tokens['GLBID']:
-        h1 = headers_base.copy()
-        h1['X-GLB-Token'] = tokens['GLBID']
-        res = requests.get(url, headers=h1, timeout=TIMEOUT)
-        if res.status_code == 200: return res, 200
-
-    # ESTRATÉGIA 2: JWT no Header X-GLB-Token (Moderno Web)
-    if tokens['JWT']:
-        h2 = headers_base.copy()
-        h2['X-GLB-Token'] = tokens['JWT']
-        res = requests.get(url, headers=h2, timeout=TIMEOUT)
-        if res.status_code == 200: 
-            print("🔹 Sucesso com X-GLB-Token: JWT")
-            return res, 200
-
-    # ESTRATÉGIA 3: JWT no Header Authorization (Padrão API/Mobile)
-    if tokens['JWT']:
-        h3 = headers_base.copy()
-        h3['Authorization'] = f"Bearer {tokens['JWT']}"
-        h3['x-glb-auth'] = 'oidc' # Header auxiliar comum na Globo
-        res = requests.get(url, headers=h3, timeout=TIMEOUT)
-        if res.status_code == 200: 
-            print("🔹 Sucesso com Authorization: Bearer JWT")
-            return res, 200
-    
-    return None, 401
-
+# --- 3. API INTELIGENTE ---
 def get_dados_time_smart(time_id, rodada, is_live):
     url_parcial = f"https://api.cartola.globo.com/time/parcial/{time_id}"
     url_oficial = f"https://api.cartola.globo.com/time/id/{time_id}/{rodada}"
     url = url_parcial if is_live else url_oficial
     
     try:
-        res, status = request_pro_inteligente(url)
-        if res and status == 200:
-            return res.json()
+        # Tenta acesso PRO (Bearer Token)
+        headers = get_pro_headers()
+        if headers:
+            res = requests.get(url, headers=headers, timeout=TIMEOUT)
+            if res.status_code == 200: return res.json()
         
         # Fallback Público
         res = requests.get(url, headers=get_public_headers(), timeout=TIMEOUT)
@@ -133,11 +103,11 @@ def get_dados_time_smart(time_id, rodada, is_live):
 
 # --- 4. EXECUÇÃO PRINCIPAL ---
 def rodar_coleta():
-    if not COOKIE_SECRET:
+    if not TOKEN_SECRET:
         print("⚠️ AVISO: Variável CARTOLA_GLBID vazia.")
     else:
-        tokens = extrair_tokens(COOKIE_SECRET)
-        print(f"🍪 Cookies carregados. GLBID: {'✅' if tokens['GLBID'] else '❌'} | JWT: {'✅' if tokens['JWT'] else '❌'}")
+        # Mostra o início do token para confirmação (Segurança: mostra só os 10 primeiros chars)
+        print(f"🔑 Token carregado: {TOKEN_SECRET[:10]}...")
     
     client = get_bq_client()
     garantir_dataset(client)
@@ -146,55 +116,44 @@ def rodar_coleta():
     try:
         status_api = requests.get("https://api.cartola.globo.com/mercado/status", headers=get_public_headers(), timeout=TIMEOUT).json()
     except Exception as e:
-        print(f"❌ Erro fatal ao checar mercado: {e}")
+        print(f"❌ Erro fatal: {e}")
         return
 
     mercado_status = status_api.get('status_mercado', 1) 
     rodada_cartola = status_api.get('rodada_atual', 0)
-    game_over = status_api.get('game_over', False)
     is_live = (mercado_status == 2)
-    tipo_dado = "PREVIA" if (is_live and game_over) else ("PARCIAL" if is_live else "OFICIAL")
     rodada_alvo = rodada_cartola if is_live else (rodada_cartola - 1)
+    tipo_dado = "PARCIAL" if is_live else "OFICIAL"
+    
     print(f"🔄 Rodada Alvo: {rodada_alvo} ({tipo_dado})")
 
-    # 2. Metadados
-    try:
-        res_clubes = requests.get("https://api.cartola.globo.com/clubes", headers=get_public_headers(), timeout=TIMEOUT).json()
-        posicoes = {'1': 'Goleiro', '2': 'Lateral', '3': 'Zagueiro', '4': 'Meia', '5': 'Atacante', '6': 'Técnico'}
-    except: posicoes = {}
-
-    # 3. BUSCA DA LIGA
-    print(f"🌍 Tentando acessar dados da liga: {LIGA_SLUG}")
+    # 2. BUSCA DA LIGA (O Teste de Fogo)
+    print(f"🌍 Acessando liga: {LIGA_SLUG}")
     
-    url_auth = f"https://api.cartola.globo.com/auth/liga/{LIGA_SLUG}"
-    res_liga, status_liga = request_pro_inteligente(url_auth)
+    url_auth = f"https://api.cartola.globo.com/auth/liga/{LIGA_SLUG}?orderBy=campeonato&page=1"
+    headers_pro = get_pro_headers()
     
-    if status_liga == 200:
-        print("✅ Acesso via rota PRO (/auth/liga) funcionou!")
+    # Faz a requisição IDENTICA ao cURL
+    res_liga = requests.get(url_auth, headers=headers_pro, timeout=TIMEOUT)
+    
+    if res_liga.status_code == 200:
+        print("✅ SUCESSO! Acesso PRO confirmado via Bearer Token.")
     else:
-        print(f"⚠️ Todas as tentativas PRO falharam. Bloqueio de IP suspeito. Tentando rota pública...")
-        try:
-            url_pub = f"https://api.cartola.globo.com/liga/{LIGA_SLUG}"
-            res_liga = requests.get(url_pub, headers=get_public_headers(), timeout=TIMEOUT)
-        except Exception as e:
-            print(f"❌ Erro na rota pública: {e}")
-            res_liga = None
+        print(f"❌ Falha PRO ({res_liga.status_code}): {res_liga.text[:200]}")
+        print("⚠️ Tentando rota pública como última esperança...")
+        url_pub = f"https://api.cartola.globo.com/liga/{LIGA_SLUG}"
+        res_liga = requests.get(url_pub, headers=get_public_headers(), timeout=TIMEOUT)
 
-    if res_liga is None or res_liga.status_code != 200:
-        code = res_liga.status_code if res_liga else 'N/A'
-        print(f"❌ Erro final ao acessar liga: {code}")
-        if code == 500: print("👉 Erro 500 na pública confirma: a liga é privada e exige Auth.")
+    if res_liga.status_code != 200:
+        print(f"❌ Erro final ({res_liga.status_code}). Verifique se o Token expirou.")
         return
 
     times_liga = res_liga.json().get('times', [])
-    if not times_liga:
-        print(f"⚠️ A liga foi acessada mas não retornou times. Resposta: {res_liga.json()}")
-        return
+    print(f"🚀 Processando {len(times_liga)} times...")
 
     ts_agora = datetime.now(pytz.timezone('America/Sao_Paulo'))
     l_hist, l_esc = [], []
-
-    print(f"🚀 Processando {len(times_liga)} times...")
+    posicoes = {'1': 'Goleiro', '2': 'Lateral', '3': 'Zagueiro', '4': 'Meia', '5': 'Atacante', '6': 'Técnico'}
 
     for time_obj in times_liga:
         nome_time = time_obj['nome']
