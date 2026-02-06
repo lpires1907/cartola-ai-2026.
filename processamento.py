@@ -24,7 +24,7 @@ def atualizar_campeoes_mensais():
 
     print("📊 Atualizando Campeões Mensais e Status...")
 
-    # nosec: Query de manutenção interna, variáveis controladas pelo código.
+    # A correção está no UPDATE SET abaixo: `Campeao ` (com espaço entre crases)
     query_merge = f"""
     MERGE `{client.project}.{TAB_MENSAL}` T
     USING (
@@ -66,11 +66,11 @@ def atualizar_campeoes_mensais():
     ON T.Rodada = S.Rodada
     WHEN MATCHED THEN
         UPDATE SET 
-            Campeao = S.campeao,
+            `Campeao ` = S.campeao,  -- CORRIGIDO: Adicionado crase e o espaço que existe na sua tabela
             Vice = S.vice,
             Status = S.novo_status,
             DataStatus = S.data_atualizacao
-    """ # nosec
+    """ 
     
     try:
         client.query(query_merge).result()
