@@ -20,23 +20,33 @@ GCP_JSON = os.getenv('GCP_SERVICE_ACCOUNT')
 GLBID_SECRET = os.getenv('CARTOLA_GLBID') 
 TIMEOUT = 30 
 
-# --- 1. AUTENTICAÇÃO ---
-def get_headers():
+# --- 1. GERENCIAMENTO DE HEADERS ---
+def get_auth_headers():
     """
-    Usa o Cookie glbId para autenticação.
-    Adicionado Referer e Origin para simular navegador real.
+    Retorna headers COMPLETOS para rotas /auth/
+    Inclui Cookie e X-GLB-Token conforme API PRO 2026.
     """
-    headers = {
+    if not GLBID_SECRET:
+        return None
+        
+    return {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
         'Accept': 'application/json',
+        'Cookie': f'glbId={GLBID_SECRET}',
+        'X-GLB-Token': GLBID_SECRET, # Header obrigatório para API PRO
         'Referer': 'https://cartola.globo.com/',
         'Origin': 'https://cartola.globo.com'
     }
-    
-    if GLBID_SECRET:
-        headers['Cookie'] = f'glbId={GLBID_SECRET}'
-        
-    return headers
+
+def get_public_headers():
+    """
+    Retorna headers LIMPOS para rotas públicas.
+    NÃO envia cookies para evitar Erro 500.
+    """
+    return {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        'Accept': 'application/json'
+    }
 
 # --- 2. INFRAESTRUTURA ---
 def get_bq_client():
@@ -70,18 +80,15 @@ def salvar_bigquery(client, df, tabela, schema):
 def get_dados_time_smart(time_id, rodada, is_live):
     url = f"https://api.cartola.globo.com/time/parcial/{time_id}" if is_live else f"https://api.cartola.globo.com/time/id/{time_id}/{rodada}"
     try:
-        # Tenta com headers completos (Cookie)
-        res = requests.get(url, headers=get_headers(), timeout=TIMEOUT)
+        # Tenta pegar dados com credenciais PRO primeiro
+        auth_h = get_auth_headers()
+        if auth_h:
+            res = requests.get(url, headers=auth_h, timeout=TIMEOUT)
+            if res.status_code == 200: return res.json()
         
-        if res.status_code == 200: return res.json()
-        
-        # Fallback se der erro de permissão ou não encontrado
-        if res.status_code in [401, 403, 404, 500]:
-            # Tenta sem cookie (modo público/anônimo) para evitar conflito
-            res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=TIMEOUT)
-            return res.json() if res.status_code == 200 else {'pontos': 0, 'atletas': []}
-            
-        return {'pontos': 0, 'atletas': []}
+        # Fallback para público se a auth falhar
+        res = requests.get(url, headers=get_public_headers(), timeout=TIMEOUT)
+        return res.json() if res.status_code == 200 else {'pontos': 0, 'atletas': []}
     except: return {'pontos': 0, 'atletas': []}
 
 # --- 4. EXECUÇÃO PRINCIPAL ---
@@ -89,14 +96,14 @@ def rodar_coleta():
     if not GLBID_SECRET:
         print("⚠️ AVISO: Sem Cookie GLBID configurado. Acesso a ligas privadas falhará.")
     else:
-        print("🍪 Cookie GLBID carregado. Iniciando coleta...")
+        print("🍪 Cookie GLBID carregado. Configurando headers PRO...")
     
     client = get_bq_client()
     garantir_dataset(client)
 
-    # 1. Checa Status do Mercado
+    # 1. Checa Status do Mercado (Público)
     try:
-        status_api = requests.get("https://api.cartola.globo.com/mercado/status", headers={'User-Agent': 'Mozilla/5.0'}, timeout=TIMEOUT).json()
+        status_api = requests.get("https://api.cartola.globo.com/mercado/status", headers=get_public_headers(), timeout=TIMEOUT).json()
     except Exception as e:
         print(f"❌ Erro fatal ao checar mercado: {e}")
         return
@@ -113,33 +120,33 @@ def rodar_coleta():
 
     # 2. Metadados
     try:
-        res_clubes = requests.get("https://api.cartola.globo.com/clubes", headers={'User-Agent': 'Mozilla/5.0'}, timeout=TIMEOUT).json()
+        res_clubes = requests.get("https://api.cartola.globo.com/clubes", headers=get_public_headers(), timeout=TIMEOUT).json()
         posicoes = {'1': 'Goleiro', '2': 'Lateral', '3': 'Zagueiro', '4': 'Meia', '5': 'Atacante', '6': 'Técnico'}
     except: posicoes = {}
 
     # 3. BUSCA DA LIGA
     print(f"🌍 Tentando acessar dados da liga: {LIGA_SLUG}")
     
-    # TENTATIVA 1: Rota Autenticada (COM COOKIE)
+    # TENTATIVA 1: Rota Autenticada (COM HEADERS PRO)
     url_auth = f"https://api.cartola.globo.com/auth/liga/{LIGA_SLUG}"
-    res_liga = requests.get(url_auth, headers=get_headers(), timeout=TIMEOUT)
+    res_liga = requests.get(url_auth, headers=get_auth_headers(), timeout=TIMEOUT)
     
     if res_liga.status_code == 200:
-        print("✅ Acesso via rota autenticada (/auth/liga) funcionou!")
+        print("✅ Acesso via rota PRO (/auth/liga) funcionou!")
     else:
-        print(f"⚠️ Rota autenticada retornou {res_liga.status_code}. Tentando rota pública (anônima)...")
+        print(f"⚠️ Rota PRO retornou {res_liga.status_code}. Tentando rota pública (anônima)...")
         
-        # TENTATIVA 2: Rota Pública (SEM COOKIE - CORREÇÃO CRÍTICA)
-        # Se enviarmos o cookie para a rota pública, dá erro 500.
-        # Aqui enviamos apenas um User-Agent limpo.
+        # TENTATIVA 2: Rota Pública (SEM COOKIES PARA EVITAR ERRO 500)
         url_pub = f"https://api.cartola.globo.com/liga/{LIGA_SLUG}"
-        res_liga = requests.get(url_pub, headers={'User-Agent': 'Mozilla/5.0'}, timeout=TIMEOUT)
+        res_liga = requests.get(url_pub, headers=get_public_headers(), timeout=TIMEOUT)
 
     # Se ambas falharem
     if res_liga.status_code != 200:
         print(f"❌ Erro final ao acessar liga: {res_liga.status_code}")
         if res_liga.status_code == 500:
-            print("👉 O servidor da Globo retornou erro interno.")
+            print("👉 O servidor da Globo retornou erro interno (provavelmente conflito de sessão).")
+        elif res_liga.status_code == 404:
+            print("👉 Liga não encontrada ou Slug incorreto.")
         return
 
     times_liga = res_liga.json().get('times', [])
