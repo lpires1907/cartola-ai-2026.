@@ -16,73 +16,25 @@ TAB_ESCALACOES = f"{DATASET_ID}.times_escalacoes"
 TAB_ATLETAS = f"{DATASET_ID}.atletas_globais"
 
 # Variáveis globais
-BEARER_TOKEN = None
 GCP_JSON = os.getenv('GCP_SERVICE_ACCOUNT')
-GLBID_SECRET = os.getenv('CARTOLA_GLBID') # Pega o cookie direto do ambiente
+GLBID_SECRET = os.getenv('CARTOLA_GLBID') 
 TIMEOUT = 30 
 
-# --- 1. AUTENTICAÇÃO E HEADERS ---
+# --- 1. AUTENTICAÇÃO (COOKIE DIRETO) ---
 def get_headers():
     """
-    Gera os headers de autenticação.
-    Prioridade 1: Bearer Token (se existir e for novo)
-    Prioridade 2: Cookie glbId (se existir, usa direto)
+    Usa exclusivamente o Cookie glbId para autenticação.
+    Não tentamos mais usar Bearer Token.
     """
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        'Accept': 'application/json'
     }
     
-    if BEARER_TOKEN:
-        headers['Authorization'] = f'Bearer {BEARER_TOKEN}'
-        headers['x-glb-auth'] = 'oidc'
-    elif GLBID_SECRET:
-        # AQUI ESTÁ O PULO DO GATO: Usa o cookie direto se não tiver token
+    if GLBID_SECRET:
         headers['Cookie'] = f'glbId={GLBID_SECRET}'
         
     return headers
-
-def buscar_token_automatico():
-    """
-    Tenta gerar um Bearer Token novo. 
-    Se falhar, retorna None, mas o código seguirá usando o Cookie via get_headers().
-    """
-    # 1. Tenta renovar usando o Cookie
-    if GLBID_SECRET:
-        print("🍪 Tentando renovar Token usando Cookie GLBID...")
-        try:
-            headers_cookie = {
-                'Cookie': f'glbId={GLBID_SECRET}',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
-            }
-            # Tenta endpoint padrão
-            res = requests.get("https://api.cartola.globo.com/auth/token", headers=headers_cookie, timeout=TIMEOUT)
-            
-            if res.status_code == 200:
-                print("✅ Token Bearer gerado com sucesso!")
-                return res.json().get('token')
-            else:
-                print(f"⚠️ API de Token retornou {res.status_code}. Seguiremos usando o Cookie direto (Isso é normal).")
-                return None
-        except Exception as e:
-            print(f"⚠️ Erro ao tentar renovar token: {e}. Seguiremos usando o Cookie direto.")
-            return None
-
-    # 2. Login com User/Senha (Fallback)
-    email = os.getenv('CARTOLA_EMAIL')
-    senha = os.getenv('CARTOLA_SENHA')
-    
-    if email and senha:
-        print("🔐 Tentando login via Email/Senha (Fallback)...")
-        try:
-            payload = {"payload": {"email": email, "password": senha, "serviceId": 438}}
-            h_login = {'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0'}
-            res = requests.post("https://login.globo.com/api/authentication", json=payload, headers=h_login, timeout=TIMEOUT)
-            res.raise_for_status()
-            return None 
-        except:
-            print("❌ Login User/Senha falhou (Normal devido a proteção anti-bot).")
-    
-    return None
 
 # --- 2. INFRAESTRUTURA ---
 def get_bq_client():
@@ -100,8 +52,8 @@ def garantir_dataset(client):
 
 def limpar_dados_rodada(client, rodada):
     print(f"🧹 Limpando dados da Rodada {rodada}...")
-    # nosec: Safe format
-    sqls = [f"DELETE FROM `{client.project}.{t}` WHERE rodada = {rodada}" for t in [TAB_HISTORICO, TAB_ESCALACOES, TAB_ATLETAS]] # nosec
+    # nosec
+    sqls = [f"DELETE FROM `{client.project}.{t}` WHERE rodada = {rodada}" for t in [TAB_HISTORICO, TAB_ESCALACOES, TAB_ATLETAS]] 
     for sql in sqls:
         try: client.query(sql).result()
         except: pass
@@ -116,11 +68,12 @@ def salvar_bigquery(client, df, tabela, schema):
 def get_dados_time_smart(time_id, rodada, is_live):
     url = f"https://api.cartola.globo.com/time/parcial/{time_id}" if is_live else f"https://api.cartola.globo.com/time/id/{time_id}/{rodada}"
     try:
-        # Usa get_headers() que agora injeta o Cookie se necessário
+        # Usa sempre o cookie para garantir acesso a parciais de ligas privadas
         res = requests.get(url, headers=get_headers(), timeout=TIMEOUT)
+        
         if res.status_code == 200: return res.json()
         
-        # Fallback público (se der 401/403)
+        # Fallback público
         if res.status_code in [401, 403]:
             res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=TIMEOUT)
             return res.json() if res.status_code == 200 else {'pontos': 0, 'atletas': []}
@@ -130,15 +83,16 @@ def get_dados_time_smart(time_id, rodada, is_live):
 
 # --- 4. EXECUÇÃO PRINCIPAL ---
 def rodar_coleta():
-    global BEARER_TOKEN
     
-    # 1. Tenta autenticação (mas não morre se falhar)
-    BEARER_TOKEN = buscar_token_automatico()
+    if not GLBID_SECRET:
+        print("⚠️ AVISO: Sem Cookie GLBID configurado. Acesso a ligas privadas falhará.")
+    else:
+        print("🍪 Cookie GLBID carregado. Usando autenticação direta.")
     
     client = get_bq_client()
     garantir_dataset(client)
 
-    # 2. Status Mercado
+    # 1. Status Mercado
     try:
         status_api = requests.get("https://api.cartola.globo.com/mercado/status", headers={'User-Agent': 'Mozilla/5.0'}, timeout=TIMEOUT).json()
     except Exception as e:
@@ -155,40 +109,26 @@ def rodar_coleta():
 
     print(f"🔄 Rodada Alvo: {rodada_alvo} ({tipo_dado})")
 
-    # 3. Metadados
+    # 2. Metadados
     try:
         res_clubes = requests.get("https://api.cartola.globo.com/clubes", headers={'User-Agent': 'Mozilla/5.0'}, timeout=TIMEOUT).json()
-        clubes = {str(id): t['nome'] for id, t in res_clubes.items()}
         posicoes = {'1': 'Goleiro', '2': 'Lateral', '3': 'Zagueiro', '4': 'Meia', '5': 'Atacante', '6': 'Técnico'}
-    except: clubes, posicoes = {}, {}
+    except: posicoes = {}
 
-    # 4. BUSCA DA LIGA
+    # 3. BUSCA DA LIGA
     print(f"🌍 Tentando acessar dados da liga: {LIGA_SLUG}")
     
-    # Tenta direto a API Privada usando a autenticação melhorada
-    url_liga = f"https://api.cartola.globo.com/auth/liga/{LIGA_SLUG}"
+    # URL padrão + Headers com Cookie
+    url_liga = f"https://api.cartola.globo.com/liga/{LIGA_SLUG}"
     res_liga = requests.get(url_liga, headers=get_headers(), timeout=TIMEOUT)
     
-    # Se falhar, tenta a pública como fallback
     if res_liga.status_code != 200:
-        print(f"⚠️ Acesso autenticado retornou {res_liga.status_code}. Tentando endpoint público...")
-        url_liga = f"https://api.cartola.globo.com/liga/{LIGA_SLUG}"
-        res_liga = requests.get(url_liga, headers={'User-Agent': 'Mozilla/5.0'}, timeout=TIMEOUT)
-
-    if res_liga.status_code != 200:
-        # CORREÇÃO CRÍTICA AQUI:
-        # Só falha se não tivermos nem Token E nem Cookie
-        if not BEARER_TOKEN and not GLBID_SECRET:
-             print("❌ Erro: Liga privada requer login, e não temos nem Token nem Cookie.")
-             return
-        
-        # Se tivermos Cookie, tentamos novamente forçando os headers na url de auth
-        print("🔄 Tentando novamente endpoint autenticado com Cookie direto...")
-        res_liga = requests.get(f"https://api.cartola.globo.com/auth/liga/{LIGA_SLUG}", headers=get_headers(), timeout=TIMEOUT)
-        
-        if res_liga.status_code != 200:
-             print(f"❌ Erro fatal: Não foi possível acessar a liga. Status: {res_liga.status_code}")
-             return
+        print(f"❌ Erro ao acessar liga: {res_liga.status_code}")
+        if res_liga.status_code == 401:
+            print("👉 O Cookie pode estar expirado ou o usuário não está nessa liga.")
+        elif res_liga.status_code == 404:
+            print("👉 Slug da liga incorreto.")
+        return
 
     times_liga = res_liga.json().get('times', [])
     ts_agora = datetime.now(pytz.timezone('America/Sao_Paulo'))
@@ -200,7 +140,6 @@ def rodar_coleta():
         nome_time = time_obj['nome']
         dados_time = get_dados_time_smart(time_obj['time_id'], rodada_alvo, is_live)
         
-        # Lógica de Pontos
         pts = dados_time.get('pontos')
         if pts is None: pts = time_obj.get('pontos', {}).get('rodada', 0.0)
         
@@ -219,7 +158,6 @@ def rodar_coleta():
                 'status_rodada': tipo_dado, 'timestamp': ts_agora
             })
 
-    # Carga no Banco
     if l_hist:
         limpar_dados_rodada(client, rodada_alvo)
         s_hist = [bigquery.SchemaField("nome", "STRING"), bigquery.SchemaField("pontos", "FLOAT"), bigquery.SchemaField("rodada", "INTEGER"), bigquery.SchemaField("timestamp", "TIMESTAMP"), bigquery.SchemaField("tipo_dado", "STRING")]
