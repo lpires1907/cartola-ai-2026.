@@ -20,51 +20,48 @@ GCP_JSON = os.getenv('GCP_SERVICE_ACCOUNT')
 COOKIE_SECRET = os.getenv('CARTOLA_GLBID') 
 TIMEOUT = 30 
 
-# --- 1. GERENCIAMENTO DE HEADERS (CORRIGIDO) ---
+# --- 1. GERENCIAMENTO DE HEADERS (LÓGICA JWT) ---
 def get_auth_headers():
     """
-    Constrói os headers PRO.
-    CORREÇÃO: Busca robusta pelo token GLBID (maiúsculo ou minúsculo).
+    Constrói headers PRO priorizando o Token JWT (glb_uid_jwt).
     """
     if not COOKIE_SECRET:
         return None
 
-    # 1. O Header 'Cookie' deve ser a string completa que você colou
     cookie_full = COOKIE_SECRET
-
-    # 2. O Header 'X-GLB-Token' precisa ser APENAS o valor do código
     x_glb_token = ""
     
     try:
-        # Quebra a string em pedaços separados por ponto-e-vírgula
-        partes = [p.strip() for p in cookie_full.split(';')]
-        
+        # Quebra a string em um dicionário simples para busca segura
+        # Ex: "Key=Value; Key2=Value2" -> {'Key': 'Value', 'Key2': 'Value2'}
+        partes = [p.strip() for p in cookie_full.split(';') if '=' in p]
+        cookies_dict = {}
         for p in partes:
-            # Procura por GLBID= ou glbId= (case insensitive manual)
-            if p.startswith('GLBID=') or p.startswith('glbId='):
-                x_glb_token = p.split('=')[1]
-                break
+            k, v = p.split('=', 1)
+            cookies_dict[k] = v
+
+        # 1. Prioridade TOTAL para o JWT (Assinatura PRO)
+        if 'glb_uid_jwt' in cookies_dict:
+            x_glb_token = cookies_dict['glb_uid_jwt']
         
-        # Se não achou GLBID, tenta usar o glb_uid_jwt como fallback
-        if not x_glb_token:
-            for p in partes:
-                if p.startswith('glb_uid_jwt='):
-                    x_glb_token = p.split('=')[1]
-                    break
+        # 2. Fallback para GLBID (Sessão Simples) se não achar JWT
+        elif 'GLBID' in cookies_dict:
+            x_glb_token = cookies_dict['GLBID']
+        elif 'glbId' in cookies_dict:
+             x_glb_token = cookies_dict['glbId']
                     
     except Exception as e:
         print(f"⚠️ Erro ao processar string de cookies: {e}")
 
-    # Se ainda estiver vazio, define um valor genérico para não quebrar (mas vai dar 401)
     if not x_glb_token:
-        print("⚠️ AVISO: Não foi possível extrair o GLBID ou JWT da string de cookies.")
-        x_glb_token = "erro_extracao"
+        print("⚠️ AVISO: Não foi possível extrair glb_uid_jwt nem GLBID. Tentando usar string completa (risco de falha).")
+        x_glb_token = cookie_full
 
     return {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
         'Accept': 'application/json',
-        'Cookie': cookie_full,       # Cookie Completo
-        'X-GLB-Token': x_glb_token,  # Apenas o Token limpo
+        'Cookie': cookie_full,       
+        'X-GLB-Token': x_glb_token,  # Aqui vai o JWT agora!
         'Referer': 'https://cartola.globo.com/',
         'Origin': 'https://cartola.globo.com'
     }
@@ -123,8 +120,10 @@ def rodar_coleta():
     if not COOKIE_SECRET:
         print("⚠️ AVISO: Variável CARTOLA_GLBID vazia.")
     else:
-        # Máscara simples para logar sem vazar o segredo
-        print(f"🍪 Cookies carregados (Tamanho: {len(COOKIE_SECRET)} chars). Iniciando coleta PRO...")
+        # Debug seguro: Mostra o início do Token que será usado
+        headers_teste = get_auth_headers()
+        token_usado = headers_teste.get('X-GLB-Token', 'NENHUM')[:15]
+        print(f"🍪 Cookies carregados. Token JWT ativo: {token_usado}...")
     
     client = get_bq_client()
     garantir_dataset(client)
@@ -172,9 +171,7 @@ def rodar_coleta():
     if res_liga.status_code != 200:
         print(f"❌ Erro final ao acessar liga: {res_liga.status_code}")
         if res_liga.status_code == 401:
-            print("👉 Dica: O token X-GLB-Token pode estar incorreto ou o cookie expirou.")
-        elif res_liga.status_code == 500:
-             print("👉 Dica: Servidor da Globo rejeitou a requisição (provável conflito de sessão pública/privada).")
+            print("👉 Dica: JWT rejeitado. O cookie pode estar vinculado a outro IP (proteção da Globo).")
         return
 
     times_liga = res_liga.json().get('times', [])
