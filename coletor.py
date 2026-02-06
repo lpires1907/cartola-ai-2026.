@@ -18,7 +18,7 @@ TAB_ATLETAS = f"{DATASET_ID}.atletas_globais"
 # Variáveis globais
 BEARER_TOKEN = None
 GCP_JSON = os.getenv('GCP_SERVICE_ACCOUNT')
-TIMEOUT = 20 # Timeout para evitar travamento do Bandit/Actions
+TIMEOUT = 30 # Timeout para evitar travamento do Bandit/Actions
 
 # --- 1. AUTENTICAÇÃO DINÂMICA ---
 def buscar_token_automatico():
