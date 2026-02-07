@@ -121,4 +121,63 @@ with c3:
 
 with c4:
     st.markdown("### 🐢 Zicada")
-    st.metric("Menor Pontuação (Zica)", top_zicada['nome'], f"{top_zicada['menor_pontuacao']:.1
+    # A LINHA DO ERRO FOI CORRIGIDA ABAIXO:
+    st.metric("Menor Pontuação (Zica)", top_zicada['nome'], f"{top_zicada['menor_pontuacao']:.1f}", delta_color="inverse")
+
+st.markdown("---")
+
+# --- GRÁFICOS TOP 5 ---
+st.subheader("📊 Classificação Top 5")
+tab1, tab2, tab3 = st.tabs(["🌎 Geral", f"🔄 {nome_turno}", f"📅 Mensal ({nome_mes_atual})"])
+
+def plot_top5(df, y_col, color_col, title):
+    df_top = df.sort_values(y_col, ascending=False).head(5)
+    fig = px.bar(
+        df_top, x=y_col, y='nome', text=y_col, orientation='h',
+        color=color_col, color_continuous_scale='Greens', title=title
+    )
+    fig.update_layout(yaxis={'categoryorder':'total ascending'}, showlegend=False)
+    fig.update_traces(texttemplate='%{text:.1f}', textposition='outside')
+    return fig
+
+with tab1: st.plotly_chart(plot_top5(df_view, 'total_geral', 'total_geral', "Top 5 Geral"), use_container_width=True)
+with tab2: st.plotly_chart(plot_top5(df_view, coluna_turno, coluna_turno, f"Top 5 - {nome_turno}"), use_container_width=True)
+with tab3: st.plotly_chart(plot_top5(df_view, col_mes_atual, col_mes_atual, f"Top 5 - {nome_mes_atual}"), use_container_width=True)
+
+# --- TABELA COMPLETA ---
+st.markdown("---")
+with st.expander("📋 Ver Tabela Completa (Todos os Meses)", expanded=False):
+    st.dataframe(
+        df_view.style.format("{:.1f}", subset=df_view.select_dtypes(include='number').columns)
+               .background_gradient(subset=['total_geral'], cmap='Greens'),
+        use_container_width=True
+    )
+
+# --- RAIO-X (DETALHADO) ---
+st.markdown("---")
+st.subheader("🔬 Raio-X Detalhado (Escalações)")
+filtro_rodada = st.selectbox("Escolha a Rodada:", sorted(range(1, rodada_atual + 1), reverse=True))
+
+@st.cache_data
+def get_escalacoes(rodada):
+    # CORREÇÃO BANDIT: O '# nosec' deve ficar na linha do fechamento da string
+    q = f""" 
+        SELECT liga_time_nome as Time, atleta_apelido as Jogador, atleta_posicao as Posicao, 
+               pontos as Pontos, is_capitao as Capitao
+        FROM `cartola_analytics.times_escalacoes`
+        WHERE rodada = {rodada}
+        ORDER BY Time, Pontos DESC
+    """ # nosec
+    return client.query(q).to_dataframe()
+
+df_detalhe = get_escalacoes(filtro_rodada)
+
+if not df_detalhe.empty:
+    st.dataframe(
+        df_detalhe.style.format({"Pontos": "{:.1f}"})
+              .applymap(lambda x: "background-color: #d1e7dd; font-weight: bold" if x else "", subset=['Capitao']),
+        use_container_width=True,
+        hide_index=True
+    )
+else:
+    st.warning("Nenhum dado encontrado para esta rodada.")
