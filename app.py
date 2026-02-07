@@ -151,7 +151,6 @@ with c1:
         lider = top_geral.iloc[0]
         vice = top_geral.iloc[1]
         
-        # BLINDAGEM 3: Usando safe_get para evitar TypeError de listas
         nome_lider = safe_get(lider['nome'])
         nome_vice = safe_get(vice['nome'])
         
@@ -159,11 +158,14 @@ with c1:
         val_vice = float(safe_get(vice['total_geral']))
         delta_val = val_vice - val_lider
         
-        st.metric("Líder", nome_lider, f"{val_lider:.1f}")
-        st.metric("Vice", nome_vice, f"{val_vice:.1f}", delta=f"{delta_val:.1f}")
+        # --- CORREÇÃO DO ERRO TYPE ERROR ---
+        # Exibimos o Nome e os Pontos juntos no "Value", e a Diferença no "Delta"
+        st.metric("Líder", f"{nome_lider}", f"{val_lider:.1f} pts")
+        st.metric("Vice", f"{nome_vice}", f"{val_vice:.1f} pts", delta=f"{delta_val:.1f}")
+        
     elif len(top_geral) == 1:
         lider = top_geral.iloc[0]
-        st.metric("Líder", safe_get(lider['nome']), f"{float(safe_get(lider['total_geral'])):.1f}")
+        st.metric("Líder", safe_get(lider['nome']), f"{float(safe_get(lider['total_geral'])):.1f} pts")
 
 with c2:
     st.markdown(f"### 🥈 {nome_turno}")
@@ -178,8 +180,9 @@ with c2:
         val_vice_t = float(safe_get(vice_t[coluna_turno]))
         delta_t = val_vice_t - val_lider_t
         
-        st.metric("Líder", nome_lider_t, f"{val_lider_t:.1f}")
-        st.metric("Vice", nome_vice_t, f"{val_vice_t:.1f}", delta=f"{delta_t:.1f}")
+        # --- CORREÇÃO DO ERRO TYPE ERROR ---
+        st.metric("Líder", f"{nome_lider_t}", f"{val_lider_t:.1f} pts")
+        st.metric("Vice", f"{nome_vice_t}", f"{val_vice_t:.1f} pts", delta=f"{delta_t:.1f}")
 
 with c3:
     st.markdown("### 🚀 Mitada")
