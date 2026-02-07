@@ -24,6 +24,8 @@ def safe_get(value):
     mesmo que o Pandas retorne uma Series (lista) devido a duplicatas.
     """
     if isinstance(value, pd.Series):
+        if value.empty:
+            return None
         return value.iloc[0]
     return value
 
@@ -93,15 +95,11 @@ def load_data():
         df_meta = client.query(query_meta).to_dataframe()
         
         # Tratamento seguro para metadados
-        if not df_meta.empty and pd.notnull(safe_get(df_meta['rodada_atual'])):
-            rodada = int(safe_get(df_meta['rodada_atual']))
-        else:
-            rodada = 1
-            
-        if not df_meta.empty and pd.notnull(safe_get(df_meta['mes_atual'])):
-            mes_raw = safe_get(df_meta['mes_atual'])
-        else:
-            mes_raw = "Jan Fev"
+        val_rodada = safe_get(df_meta['rodada_atual']) if not df_meta.empty else 1
+        rodada = int(val_rodada) if pd.notnull(val_rodada) else 1
+        
+        val_mes = safe_get(df_meta['mes_atual']) if not df_meta.empty else "Jan Fev"
+        mes_raw = val_mes if pd.notnull(val_mes) else "Jan Fev"
         
         map_mes = {
             'Jan Fev': 'pontos_jan_fev', 'Março': 'pontos_marco', 'Abril': 'pontos_abril',
@@ -151,21 +149,23 @@ with c1:
         lider = top_geral.iloc[0]
         vice = top_geral.iloc[1]
         
-        nome_lider = safe_get(lider['nome'])
-        nome_vice = safe_get(vice['nome'])
+        # Extração segura
+        nome_lider = str(safe_get(lider['nome']))
+        nome_vice = str(safe_get(vice['nome']))
         
         val_lider = float(safe_get(lider['total_geral']))
         val_vice = float(safe_get(vice['total_geral']))
         delta_val = val_vice - val_lider
         
-        # --- CORREÇÃO DO ERRO TYPE ERROR ---
-        # Exibimos o Nome e os Pontos juntos no "Value", e a Diferença no "Delta"
-        st.metric("Líder", f"{nome_lider}", f"{val_lider:.1f} pts")
-        st.metric("Vice", f"{nome_vice}", f"{val_vice:.1f} pts", delta=f"{delta_val:.1f}")
+        # CORREÇÃO DEFINITIVA DO TYPE ERROR:
+        # Usamos argumentos nomeados (keyword arguments) para evitar confusão posicional
+        st.metric(label="Líder", value=nome_lider, delta=f"{val_lider:.1f} pts")
+        st.metric(label="Vice", value=nome_vice, delta=f"{delta_val:.1f} pts")
         
     elif len(top_geral) == 1:
         lider = top_geral.iloc[0]
-        st.metric("Líder", safe_get(lider['nome']), f"{float(safe_get(lider['total_geral'])):.1f} pts")
+        val = float(safe_get(lider['total_geral']))
+        st.metric(label="Líder", value=str(safe_get(lider['nome'])), delta=f"{val:.1f} pts")
 
 with c2:
     st.markdown(f"### 🥈 {nome_turno}")
@@ -173,28 +173,27 @@ with c2:
         lider_t = top_turno.iloc[0]
         vice_t = top_turno.iloc[1]
         
-        nome_lider_t = safe_get(lider_t['nome'])
-        nome_vice_t = safe_get(vice_t['nome'])
+        nome_lider_t = str(safe_get(lider_t['nome']))
+        nome_vice_t = str(safe_get(vice_t['nome']))
         
         val_lider_t = float(safe_get(lider_t[coluna_turno]))
         val_vice_t = float(safe_get(vice_t[coluna_turno]))
         delta_t = val_vice_t - val_lider_t
         
-        # --- CORREÇÃO DO ERRO TYPE ERROR ---
-        st.metric("Líder", f"{nome_lider_t}", f"{val_lider_t:.1f} pts")
-        st.metric("Vice", f"{nome_vice_t}", f"{val_vice_t:.1f} pts", delta=f"{delta_t:.1f}")
+        st.metric(label="Líder", value=nome_lider_t, delta=f"{val_lider_t:.1f} pts")
+        st.metric(label="Vice", value=nome_vice_t, delta=f"{delta_t:.1f} pts")
 
 with c3:
     st.markdown("### 🚀 Mitada")
     if top_mitada is not None:
         val_mitada = float(safe_get(top_mitada['maior_pontuacao']))
-        st.metric("Maior Pontuação", safe_get(top_mitada['nome']), f"{val_mitada:.1f}")
+        st.metric(label="Maior Pontuação", value=str(safe_get(top_mitada['nome'])), delta=f"{val_mitada:.1f} pts")
 
 with c4:
     st.markdown("### 🐢 Zicada")
     if top_zicada is not None:
         val_zica = float(safe_get(top_zicada['menor_pontuacao']))
-        st.metric("Menor Pontuação (Zica)", safe_get(top_zicada['nome']), f"{val_zica:.1f}", delta_color="inverse")
+        st.metric(label="Menor Pontuação", value=str(safe_get(top_zicada['nome'])), delta=f"{val_zica:.1f} pts", delta_color="inverse")
 
 st.markdown("---")
 
