@@ -7,13 +7,12 @@ from datetime import datetime
 import pytz
 from google import genai 
 
-# --- IMPORTAÇÃO SEGURA DO DOTENV ---
-# Isso permite rodar na Nuvem (onde não tem .env) sem quebrar o código
+# Importação segura do dotenv
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
-    pass # Se não tiver a biblioteca (ambiente Cloud), segue a vida usando Secrets
+    pass
 
 # --- CONFIGURAÇÕES ---
 GEMINI_KEY = os.getenv('GEMINI_API_KEY')
@@ -25,7 +24,6 @@ VIEW_CONSOLIDADA = f"{DATASET_ID}.view_consolidada_times"
 MODEL_VERSION = "gemini-2.5-flash" 
 
 def get_bq_client():
-    # Tenta pegar credenciais do ambiente ou arquivo local
     if os.path.exists("credentials.json"):
         return bigquery.Client.from_service_account_json("credentials.json")
     
@@ -41,7 +39,6 @@ def get_bq_client():
             
     return bigquery.Client()
 
-# --- CONTROLE DE REDUNDÂNCIA ---
 def ja_comentou(client, rodada, tipo):
     try:
         query = f"""
@@ -52,12 +49,10 @@ def ja_comentou(client, rodada, tipo):
         return res[0].qtd > 0
     except: return False
 
-# --- GERAÇÃO DE TEXTO ---
 def chamar_gemini(prompt):
     if not GEMINI_KEY: 
-        print("⚠️ GEMINI_API_KEY não encontrada. Pulando IA.")
+        print("⚠️ GEMINI_API_KEY não encontrada.")
         return None
-    
     try:
         client = genai.Client(api_key=GEMINI_KEY)
         response = client.models.generate_content(
@@ -69,122 +64,128 @@ def chamar_gemini(prompt):
         print(f"❌ Erro no SDK google-genai: {e}")
         return None
 
+# --- AUXILIAR: DESCOBRIR COLUNAS DO MÊS ---
+def get_coluna_mes(rodada):
+    if rodada <= 8: return "pontos_jan_fev", "Jan/Fev"
+    if rodada <= 12: return "pontos_marco", "Março"
+    if rodada <= 16: return "pontos_abril", "Abril"
+    if rodada <= 20: return "pontos_maio", "Maio"
+    if rodada <= 24: return "pontos_jun_jul", "Jun/Jul"
+    if rodada <= 29: return "pontos_agosto", "Agosto"
+    if rodada <= 33: return "pontos_setembro", "Setembro"
+    if rodada <= 36: return "pontos_outubro", "Outubro"
+    return "pontos_nov_dez", "Nov/Dez"
+
+# 1. Narrador da RODADA (Micro)
 def gerar_analise_rodada(df_ranking, rodada, status_rodada):
     lider = df_ranking.iloc[0]
-    vice_lider = df_ranking.iloc[1] if len(df_ranking) > 1 else None
-    lanterna = df_ranking.iloc[-1]
-    vice_lanterna = df_ranking.iloc[-2] if len(df_ranking) > 1 else None
+    vice = df_ranking.iloc[1] if len(df_ranking) > 1 else lider
     
+    # === CORREÇÃO: FILTRA QUEM ZEROU (Quem não jogou) ===
+    df_jogaram = df_ranking[df_ranking['pontos'] > 0]
+    
+    if df_jogaram.empty:
+        # Fallback extremo se ninguém pontuou
+        lanterna = df_ranking.iloc[-1]
+        vice_lanterna = df_ranking.iloc[-2] if len(df_ranking) > 1 else lanterna
+    else:
+        lanterna = df_jogaram.iloc[-1]
+        vice_lanterna = df_jogaram.iloc[-2] if len(df_jogaram) > 1 else lanterna
+    # ====================================================
+
     txt_status = "AO VIVO" if status_rodada == 'PARCIAL' else "FINALIZADA"
     
     prompt = f"""
-    Atue como um narrador de futebol brasileiro sarcástico e ácido. Rodada {rodada} ({txt_status}).
+    Atue como um narrador de futebol brasileiro sarcástico e divertido.
+    Resumo da Rodada {rodada} ({txt_status}).
     
-    O TOPO:
-    1. Líder: {lider['nome']} ({lider['pontos']} pts).
-    2. Sombra: {vice_lider['nome']} ({vice_lider['pontos']} pts).
+    DADOS DA RODADA:
+    1. O Mito (1º lugar): {lider['nome']} com {lider['pontos']} pts.
+    2. O "Quase" (2º lugar): {vice['nome']} com {vice['pontos']} pts.
     
-    O FUNDO:
-    1. Lanterna: {lanterna['nome']} ({lanterna['pontos']} pts).
-    2. Vice-Lanterna: {vice_lanterna['nome']} ({vice_lanterna['pontos']} pts).
+    OS BAGRES DA RODADA (Quem jogou e foi mal):
+    1. A Zicada Suprema (Último > 0): {lanterna['nome']} com {lanterna['pontos']} pts.
+    2. O Vice-Zica (Penúltimo > 0): {vice_lanterna['nome']} com {vice_lanterna['pontos']} pts.
     
-    Faça um comentário curto (max 280 chars) zoando o lanterna e alertando o líder.
+    INSTRUÇÃO:
+    Faça um comentário curto (max 280 chars) exaltando o mito e humilhando a zicada.
     """
     return chamar_gemini(prompt)
 
+# 2. Narrador GERAL (Macro)
 def gerar_analise_geral(df_view, rodada_atual):
-    lider_geral = df_view.iloc[0]
-    vice_geral = df_view.iloc[1] if len(df_view) > 1 else None
+    # 1. Líder Geral
+    lider_geral = df_view.sort_values('total_geral', ascending=False).iloc[0]
+    vice_geral = df_view.sort_values('total_geral', ascending=False).iloc[1]
     
-    if lider_geral is None: return None
+    # 2. Líder do Turno
+    col_turno = 'pontos_turno_2' if rodada_atual >= 19 else 'pontos_turno_1'
+    nome_turno = "2º Turno" if rodada_atual >= 19 else "1º Turno"
+    lider_turno = df_view.sort_values(col_turno, ascending=False).iloc[0]
+    
+    # 3. Líder do Mês
+    col_mes, nome_mes = get_coluna_mes(rodada_atual)
+    if col_mes in df_view.columns:
+        lider_mes = df_view.sort_values(col_mes, ascending=False).iloc[0]
+        dados_mes = f"- Destaque de {nome_mes}: {lider_mes['nome']} ({lider_mes[col_mes]:.1f} pts)."
+    else:
+        dados_mes = ""
 
-    maior_media = df_view.sort_values('media', ascending=False).iloc[0]
-    maior_pico = df_view.sort_values('maior_pontuacao', ascending=False).iloc[0]
-    
-    distancia_lider = (lider_geral['total_geral'] - vice_geral['total_geral']) if vice_geral is not None else 0
+    distancia = lider_geral['total_geral'] - vice_geral['total_geral']
     
     prompt = f"""
-    Analista esportivo sarcástico. Geral até rodada {rodada_atual}.
-    - Líder: {lider_geral['nome']} (Total: {lider_geral['total_geral']:.1f}).
-    - Vice: {vice_geral['nome']} (Total: {vice_geral['total_geral']:.1f}).
-    - Diferença: {distancia_lider:.1f} pts.
-    - Maior Mitada: {maior_pico['nome']} ({maior_pico['maior_pontuacao']:.1f}).
+    Analista esportivo ácido e detalhista. Resumo do campeonato até Rodada {rodada_atual}.
     
-    Resuma em um parágrafo. O campeonato está aberto ou o líder disparou?
+    OS DONOS DO JOGO:
+    - Líder Geral (Campeonato): {lider_geral['nome']} (Vantagem de {distancia:.1f} pts sobre {vice_geral['nome']}).
+    - Líder do {nome_turno}: {lider_turno['nome']} ({lider_turno[col_turno]:.1f} pts).
+    {dados_mes}
+    
+    INSTRUÇÃO:
+    Escreva um parágrafo (max 400 chars).
+    Explique quem manda no campeonato. Se for o mesmo time liderando tudo, diga que é uma dinastia.
+    Se forem times diferentes, diga que a disputa está aberta.
     """
     return chamar_gemini(prompt)
 
-# --- PERSISTÊNCIA ---
 def salvar_comentario(client, texto, rodada, tipo, ts):
     df = pd.DataFrame([{'texto': texto, 'rodada': rodada, 'tipo': tipo, 'data': ts}])
-    schema = [
-        bigquery.SchemaField("texto", "STRING"),
-        bigquery.SchemaField("rodada", "INTEGER"),
-        bigquery.SchemaField("tipo", "STRING"),
-        bigquery.SchemaField("data", "TIMESTAMP")
-    ]
-    job_config = bigquery.LoadJobConfig(
-        write_disposition="WRITE_APPEND",
-        schema_update_options=[bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION],
-        schema=schema
-    )
-    try:
-        client.load_table_from_dataframe(df, f"{client.project}.{TAB_CORNETA}", job_config=job_config).result()
-        print(f"💾 Comentário ({tipo}) salvo no BigQuery!")
-    except Exception as e:
-        print(f"❌ Erro ao salvar comentário: {e}")
+    schema = [bigquery.SchemaField("texto", "STRING"), bigquery.SchemaField("rodada", "INTEGER"), bigquery.SchemaField("tipo", "STRING"), bigquery.SchemaField("data", "TIMESTAMP")]
+    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND", schema_update_options=[bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION], schema=schema)
+    try: client.load_table_from_dataframe(df, f"{client.project}.{TAB_CORNETA}", job_config=job_config).result()
+    except: pass
 
-# --- FUNÇÃO PRINCIPAL ---
 def gerar_narracao_rodada():
-    """
-    Função principal chamada pelo main.py
-    """
     client = get_bq_client()
     ts_agora = datetime.now(pytz.timezone('America/Sao_Paulo'))
-
-    print("🎤 Narrador (IA Sarcástica) entrando em campo...")
+    print("🎤 Narrador entrando em campo...")
 
     try:
-        # Busca metadados da última rodada
-        query_meta = f"SELECT rodada, tipo_dado FROM `{client.project}.{TAB_HISTORICO}` ORDER BY timestamp DESC LIMIT 1" # nosec
-        df_meta = client.query(query_meta).to_dataframe()
-        
-        if df_meta.empty: 
-            print("⚠️ Sem dados históricos para narrar.")
-            return
+        q_meta = f"SELECT rodada, tipo_dado FROM `{client.project}.{TAB_HISTORICO}` ORDER BY timestamp DESC LIMIT 1" # nosec
+        df_meta = client.query(q_meta).to_dataframe()
+        if df_meta.empty: return
 
-        rodada_atual = int(df_meta['rodada'].iloc[0])
-        status_dados = df_meta['tipo_dado'].iloc[0]
+        rodada = int(df_meta['rodada'].iloc[0])
+        status = df_meta['tipo_dado'].iloc[0]
 
-        print(f"📢 Analisando Rodada {rodada_atual} ({status_dados})...")
+        # 1. Rodada
+        if not ja_comentou(client, rodada, 'RODADA'):
+            df_round = client.query(f"SELECT * FROM `{client.project}.{TAB_HISTORICO}` WHERE rodada = {rodada} ORDER BY pontos DESC").to_dataframe() # nosec
+            txt = gerar_analise_rodada(df_round, rodada, status)
+            if txt:
+                print(f"💬 Rodada: {txt}")
+                salvar_comentario(client, txt, rodada, 'RODADA', ts_agora)
 
-        # 1. Micro Análise (Rodada)
-        if not ja_comentou(client, rodada_atual, 'RODADA'):
-            # nosec: query simples
-            df_round = client.query(f"SELECT * FROM `{client.project}.{TAB_HISTORICO}` WHERE rodada = {rodada_atual} ORDER BY pontos DESC").to_dataframe() # nosec
-            texto = gerar_analise_rodada(df_round, rodada_atual, status_dados)
-            if texto:
-                print(f"💬 Corneta da Rodada: {texto}")
-                salvar_comentario(client, texto, rodada_atual, 'RODADA', ts_agora)
-        else:
-            print("💤 Corneta da rodada já foi feita.")
-
-        # 2. Macro Análise (Geral - Apenas se for oficial)
-        if status_dados == 'OFICIAL' and not ja_comentou(client, rodada_atual, 'GERAL'):
-            try:
-                # Importante: Usa a View Consolidada
-                df_view = client.query(f"SELECT * FROM `{client.project}.{VIEW_CONSOLIDADA}` ORDER BY total_geral DESC").to_dataframe() # nosec
-                texto_geral = gerar_analise_geral(df_view, rodada_atual)
-                if texto_geral:
-                    print(f"💬 Análise Geral: {texto_geral}")
-                    salvar_comentario(client, texto_geral, rodada_atual, 'GERAL', ts_agora)
-            except Exception as e:
-                print(f"⚠️ Erro na análise geral: {e}")
-        else:
-            print("💤 Análise geral já feita ou aguardando oficialização.")
+        # 2. Geral (Inclui Turno e Mês agora)
+        if status == 'OFICIAL' and not ja_comentou(client, rodada, 'GERAL'):
+            df_view = client.query(f"SELECT * FROM `{client.project}.{VIEW_CONSOLIDADA}`").to_dataframe() # nosec
+            txt_geral = gerar_analise_geral(df_view, rodada)
+            if txt_geral:
+                print(f"💬 Geral: {txt_geral}")
+                salvar_comentario(client, txt_geral, rodada, 'GERAL', ts_agora)
 
     except Exception as e:
-        print(f"❌ O Narrador engasgou: {e}")
+        print(f"❌ Erro Narrador: {e}")
 
 if __name__ == "__main__":
     gerar_narracao_rodada()
