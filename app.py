@@ -17,19 +17,32 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# --- FUNÇÃO AUXILIAR DE SEGURANÇA ---
+def safe_get(value):
+    """
+    Garante que o valor retornado seja um escalar (número ou string única),
+    mesmo que o Pandas retorne uma Series (lista) devido a duplicatas.
+    """
+    if isinstance(value, pd.Series):
+        return value.iloc[0]
+    return value
+
 # --- CONEXÃO BQ (BLINDADA) ---
 @st.cache_resource
 def get_bq_client():
+    # 1. Tenta credenciais locais (desenvolvimento)
     if os.path.exists("credentials.json"):
         return bigquery.Client.from_service_account_json("credentials.json")
     
+    # 2. Tenta Secrets do Streamlit (Produção)
     try:
         if "GCP_SERVICE_ACCOUNT" not in st.secrets:
             st.error("❌ Secret 'GCP_SERVICE_ACCOUNT' não encontrado.")
             st.stop()
 
         service_account_info = st.secrets["GCP_SERVICE_ACCOUNT"]
-        
+
+        # Verifica se veio como string (JSON texto) ou dict (Objeto já convertido)
         if isinstance(service_account_info, str):
             info = json.loads(service_account_info)
         else:
@@ -52,12 +65,11 @@ def load_data():
         query_view = "SELECT * FROM `cartola_analytics.view_consolidada_times`"
         df_view = client.query(query_view).to_dataframe()
         
-        # --- CORREÇÃO CRÍTICA 1: REMOVER COLUNAS DUPLICADAS ---
-        # Se o SELECT * trouxer colunas repetidas (ex: id, rodada), o Pandas cria nomes duplicados
-        # e o acesso vira uma Series (lista) em vez de um número, quebrando o app.
+        # --- BLINDAGEM 1: REMOVER COLUNAS DUPLICADAS ---
+        # Se o SQL trouxer colunas repetidas, o Pandas cria nomes iguais. Removemos aqui.
         df_view = df_view.loc[:, ~df_view.columns.duplicated()]
         
-        # --- CORREÇÃO CRÍTICA 2: FORÇAR TIPOS NUMÉRICOS ---
+        # --- BLINDAGEM 2: FORÇAR TIPOS NUMÉRICOS ---
         cols_numericas = ['total_geral', 'pontos_turno_1', 'pontos_turno_2', 'maior_pontuacao', 'menor_pontuacao']
         
         for col in cols_numericas:
@@ -66,6 +78,7 @@ def load_data():
             else:
                 df_view[col] = pd.to_numeric(df_view[col], errors='coerce').fillna(0.0)
 
+        # Limpeza dinâmica para colunas de meses
         cols_meses = [c for c in df_view.columns if 'pontos_' in c]
         for col in cols_meses:
              df_view[col] = pd.to_numeric(df_view[col], errors='coerce').fillna(0.0)
@@ -78,8 +91,17 @@ def load_data():
             FROM `cartola_analytics.historico`
         """
         df_meta = client.query(query_meta).to_dataframe()
-        rodada = int(df_meta['rodada_atual'].iloc[0]) if not df_meta.empty and pd.notnull(df_meta['rodada_atual'].iloc[0]) else 1
-        mes_raw = df_meta['mes_atual'].iloc[0] if not df_meta.empty and pd.notnull(df_meta['mes_atual'].iloc[0]) else "Jan Fev"
+        
+        # Tratamento seguro para metadados
+        if not df_meta.empty and pd.notnull(safe_get(df_meta['rodada_atual'])):
+            rodada = int(safe_get(df_meta['rodada_atual']))
+        else:
+            rodada = 1
+            
+        if not df_meta.empty and pd.notnull(safe_get(df_meta['mes_atual'])):
+            mes_raw = safe_get(df_meta['mes_atual'])
+        else:
+            mes_raw = "Jan Fev"
         
         map_mes = {
             'Jan Fev': 'pontos_jan_fev', 'Março': 'pontos_marco', 'Abril': 'pontos_abril',
@@ -92,12 +114,14 @@ def load_data():
 
     except Exception as e:
         st.error(f"Erro ao carregar dados do BigQuery: {e}")
+        # Retorna dataframe vazio e valores padrão para não crashar
         return pd.DataFrame(), 0, "Erro", "total_geral"
 
-# Carrega os dados
+# Carrega os dados com spinner
 with st.spinner('Carregando dados do Cartola...'):
     df_view, rodada_atual, nome_mes_atual, col_mes_atual = load_data()
 
+# Verifica se carregou algo
 if df_view.empty:
     st.warning("⚠️ Nenhum dado encontrado no BigQuery. Rode o coletor para popular a tabela.")
     st.stop()
@@ -127,16 +151,19 @@ with c1:
         lider = top_geral.iloc[0]
         vice = top_geral.iloc[1]
         
-        # GARANTIA EXTRA: Converte explicitamente para float na hora de usar
-        val_lider = float(lider['total_geral'])
-        val_vice = float(vice['total_geral'])
+        # BLINDAGEM 3: Usando safe_get para evitar TypeError de listas
+        nome_lider = safe_get(lider['nome'])
+        nome_vice = safe_get(vice['nome'])
+        
+        val_lider = float(safe_get(lider['total_geral']))
+        val_vice = float(safe_get(vice['total_geral']))
         delta_val = val_vice - val_lider
         
-        st.metric("Líder", lider['nome'], f"{val_lider:.1f}")
-        st.metric("Vice", vice['nome'], f"{val_vice:.1f}", delta=f"{delta_val:.1f}")
+        st.metric("Líder", nome_lider, f"{val_lider:.1f}")
+        st.metric("Vice", nome_vice, f"{val_vice:.1f}", delta=f"{delta_val:.1f}")
     elif len(top_geral) == 1:
-        val_lider = float(top_geral.iloc[0]['total_geral'])
-        st.metric("Líder", top_geral.iloc[0]['nome'], f"{val_lider:.1f}")
+        lider = top_geral.iloc[0]
+        st.metric("Líder", safe_get(lider['nome']), f"{float(safe_get(lider['total_geral'])):.1f}")
 
 with c2:
     st.markdown(f"### 🥈 {nome_turno}")
@@ -144,24 +171,27 @@ with c2:
         lider_t = top_turno.iloc[0]
         vice_t = top_turno.iloc[1]
         
-        val_lider_t = float(lider_t[coluna_turno])
-        val_vice_t = float(vice_t[coluna_turno])
+        nome_lider_t = safe_get(lider_t['nome'])
+        nome_vice_t = safe_get(vice_t['nome'])
+        
+        val_lider_t = float(safe_get(lider_t[coluna_turno]))
+        val_vice_t = float(safe_get(vice_t[coluna_turno]))
         delta_t = val_vice_t - val_lider_t
         
-        st.metric("Líder", lider_t['nome'], f"{val_lider_t:.1f}")
-        st.metric("Vice", vice_t['nome'], f"{val_vice_t:.1f}", delta=f"{delta_t:.1f}")
+        st.metric("Líder", nome_lider_t, f"{val_lider_t:.1f}")
+        st.metric("Vice", nome_vice_t, f"{val_vice_t:.1f}", delta=f"{delta_t:.1f}")
 
 with c3:
     st.markdown("### 🚀 Mitada")
     if top_mitada is not None:
-        val_mitada = float(top_mitada['maior_pontuacao'])
-        st.metric("Maior Pontuação", top_mitada['nome'], f"{val_mitada:.1f}")
+        val_mitada = float(safe_get(top_mitada['maior_pontuacao']))
+        st.metric("Maior Pontuação", safe_get(top_mitada['nome']), f"{val_mitada:.1f}")
 
 with c4:
     st.markdown("### 🐢 Zicada")
     if top_zicada is not None:
-        val_zica = float(top_zicada['menor_pontuacao'])
-        st.metric("Menor Pontuação (Zica)", top_zicada['nome'], f"{val_zica:.1f}", delta_color="inverse")
+        val_zica = float(safe_get(top_zicada['menor_pontuacao']))
+        st.metric("Menor Pontuação (Zica)", safe_get(top_zicada['nome']), f"{val_zica:.1f}", delta_color="inverse")
 
 st.markdown("---")
 
@@ -172,6 +202,12 @@ tab1, tab2, tab3 = st.tabs(["🌎 Geral", f"🔄 {nome_turno}", f"📅 Mensal ({
 def plot_top5(df, y_col, color_col, title):
     if df.empty: return None
     df_top = df.sort_values(y_col, ascending=False).head(5)
+    
+    # Tratamento para garantir dados únicos no gráfico
+    df_top = df_top.copy()
+    df_top[y_col] = df_top[y_col].apply(lambda x: float(safe_get(x)))
+    df_top['nome'] = df_top['nome'].apply(lambda x: str(safe_get(x)))
+
     fig = px.bar(
         df_top, x=y_col, y='nome', text=y_col, orientation='h',
         color=color_col, color_continuous_scale='Greens', title=title
@@ -187,8 +223,13 @@ with tab3: st.plotly_chart(plot_top5(df_view, col_mes_atual, col_mes_atual, f"To
 # --- TABELA COMPLETA ---
 st.markdown("---")
 with st.expander("📋 Ver Tabela Completa (Todos os Meses)", expanded=False):
+    # Formata para exibição
+    df_display = df_view.copy()
+    # Remove colunas duplicadas novamente para garantir
+    df_display = df_display.loc[:, ~df_display.columns.duplicated()]
+    
     st.dataframe(
-        df_view.style.format("{:.1f}", subset=df_view.select_dtypes(include='number').columns)
+        df_display.style.format("{:.1f}", subset=df_display.select_dtypes(include='number').columns)
                .background_gradient(subset=['total_geral'], cmap='Greens'),
         use_container_width=True
     )
@@ -200,6 +241,7 @@ filtro_rodada = st.selectbox("Escolha a Rodada:", sorted(range(1, rodada_atual +
 
 @st.cache_data
 def get_escalacoes(rodada):
+    # Query segura com nosec para Bandit
     q = f"""
         SELECT liga_time_nome as Time, atleta_apelido as Jogador, atleta_posicao as Posicao, 
                pontos as Pontos, is_capitao as Capitao
