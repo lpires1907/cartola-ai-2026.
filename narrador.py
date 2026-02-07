@@ -169,7 +169,7 @@ def gerar_narracao_rodada():
         status = df_meta['tipo_dado'].iloc[0]
 
         # 1. Rodada
-        if not ja_comentou(client, rodada, 'RODADA'):
+        if not ja_comentou(client, rodada,  'RODADA'):
             df_round = client.query(f"SELECT * FROM `{client.project}.{TAB_HISTORICO}` WHERE rodada = {rodada} ORDER BY pontos DESC").to_dataframe() # nosec
             txt = gerar_analise_rodada(df_round, rodada, status)
             if txt:
