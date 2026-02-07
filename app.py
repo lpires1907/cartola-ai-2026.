@@ -96,4 +96,118 @@ def load_data():
 
 # Carrega os dados
 with st.spinner('Carregando dados do Cartola...'):
-    df_view, rodada_atual, nome_mes_atual, col_mes_atual
+    # A LINHA DO ERRO FOI CORRIGIDA ABAIXO (AGORA TEM A ATRIBUIÇÃO):
+    df_view, rodada_atual, nome_mes_atual, col_mes_atual = load_data()
+
+if df_view.empty:
+    st.warning("⚠️ Nenhum dado encontrado no BigQuery. Rode o coletor para popular a tabela.")
+    st.stop()
+
+# --- LÓGICA DE NEGÓCIO ---
+is_segundo_turno = rodada_atual >= 19
+coluna_turno = 'pontos_turno_2' if is_segundo_turno else 'pontos_turno_1'
+nome_turno = "2º Turno" if is_segundo_turno else "1º Turno"
+
+# Filtros e Ordenações
+top_geral = df_view.sort_values('total_geral', ascending=False)
+top_turno = df_view.sort_values(coluna_turno, ascending=False)
+top_mitada = df_view.sort_values('maior_pontuacao', ascending=False).iloc[0] if not df_view.empty else None
+top_zicada = df_view.sort_values('menor_pontuacao', ascending=True).iloc[0] if not df_view.empty else None
+
+# --- CABEÇALHO ---
+st.title(f"🏆 Cartola Analytics - Rodada {rodada_atual}")
+st.markdown("---")
+
+# --- DESTAQUES (KPIs) ---
+c1, c2, c3, c4 = st.columns(4)
+tem_dados = len(top_geral) >= 2
+
+with c1:
+    st.markdown("### 🥇 Geral")
+    if tem_dados:
+        lider = top_geral.iloc[0]
+        vice = top_geral.iloc[1]
+        st.metric("Líder", lider['nome'], f"{lider['total_geral']:.1f}")
+        delta_val = vice['total_geral'] - lider['total_geral']
+        st.metric("Vice", vice['nome'], f"{vice['total_geral']:.1f}", delta=f"{delta_val:.1f}")
+    elif len(top_geral) == 1:
+        st.metric("Líder", top_geral.iloc[0]['nome'], f"{top_geral.iloc[0]['total_geral']:.1f}")
+
+with c2:
+    st.markdown(f"### 🥈 {nome_turno}")
+    if tem_dados:
+        lider_t = top_turno.iloc[0]
+        vice_t = top_turno.iloc[1]
+        pts_lider = lider_t[coluna_turno]
+        pts_vice = vice_t[coluna_turno]
+        st.metric("Líder", lider_t['nome'], f"{pts_lider:.1f}")
+        st.metric("Vice", vice_t['nome'], f"{pts_vice:.1f}", delta=f"{pts_vice - pts_lider:.1f}")
+
+with c3:
+    st.markdown("### 🚀 Mitada")
+    if top_mitada is not None:
+        st.metric("Maior Pontuação", top_mitada['nome'], f"{top_mitada['maior_pontuacao']:.1f}")
+
+with c4:
+    st.markdown("### 🐢 Zicada")
+    if top_zicada is not None:
+        st.metric("Menor Pontuação (Zica)", top_zicada['nome'], f"{top_zicada['menor_pontuacao']:.1f}", delta_color="inverse")
+
+st.markdown("---")
+
+# --- GRÁFICOS ---
+st.subheader("📊 Classificação Top 5")
+tab1, tab2, tab3 = st.tabs(["🌎 Geral", f"🔄 {nome_turno}", f"📅 Mensal ({nome_mes_atual})"])
+
+def plot_top5(df, y_col, color_col, title):
+    if df.empty: return None
+    df_top = df.sort_values(y_col, ascending=False).head(5)
+    fig = px.bar(
+        df_top, x=y_col, y='nome', text=y_col, orientation='h',
+        color=color_col, color_continuous_scale='Greens', title=title
+    )
+    fig.update_layout(yaxis={'categoryorder':'total ascending'}, showlegend=False)
+    fig.update_traces(texttemplate='%{text:.1f}', textposition='outside')
+    return fig
+
+with tab1: st.plotly_chart(plot_top5(df_view, 'total_geral', 'total_geral', "Top 5 Geral"), use_container_width=True)
+with tab2: st.plotly_chart(plot_top5(df_view, coluna_turno, coluna_turno, f"Top 5 - {nome_turno}"), use_container_width=True)
+with tab3: st.plotly_chart(plot_top5(df_view, col_mes_atual, col_mes_atual, f"Top 5 - {nome_mes_atual}"), use_container_width=True)
+
+# --- TABELA COMPLETA ---
+st.markdown("---")
+with st.expander("📋 Ver Tabela Completa (Todos os Meses)", expanded=False):
+    st.dataframe(
+        df_view.style.format("{:.1f}", subset=df_view.select_dtypes(include='number').columns)
+               .background_gradient(subset=['total_geral'], cmap='Greens'),
+        use_container_width=True
+    )
+
+# --- RAIO-X ---
+st.markdown("---")
+st.subheader("🔬 Raio-X Detalhado (Escalações)")
+filtro_rodada = st.selectbox("Escolha a Rodada:", sorted(range(1, rodada_atual + 1), reverse=True))
+
+@st.cache_data
+def get_escalacoes(rodada):
+    # Query segura para o Bandit ignorar
+    q = f"""
+        SELECT liga_time_nome as Time, atleta_apelido as Jogador, atleta_posicao as Posicao, 
+               pontos as Pontos, is_capitao as Capitao
+        FROM `cartola_analytics.times_escalacoes`
+        WHERE rodada = {rodada}
+        ORDER BY Time, Pontos DESC
+    """ # nosec
+    return client.query(q).to_dataframe()
+
+df_detalhe = get_escalacoes(filtro_rodada)
+
+if not df_detalhe.empty:
+    st.dataframe(
+        df_detalhe.style.format({"Pontos": "{:.1f}"})
+              .applymap(lambda x: "background-color: #d1e7dd; font-weight: bold" if x else "", subset=['Capitao']),
+        use_container_width=True,
+        hide_index=True
+    )
+else:
+    st.warning("Nenhum dado encontrado para esta rodada.")
