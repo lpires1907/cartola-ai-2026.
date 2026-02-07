@@ -17,28 +17,46 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- CONEXÃO BQ ---
+# --- CONEXÃO BQ (BLINDADA CONTRA TYPEERROR) ---
 @st.cache_resource
 def get_bq_client():
+    # 1. Tenta credenciais locais (desenvolvimento)
     if os.path.exists("credentials.json"):
         return bigquery.Client.from_service_account_json("credentials.json")
-    else:
-        info = json.loads(st.secrets["GCP_SERVICE_ACCOUNT"])
+    
+    # 2. Tenta Secrets do Streamlit (Produção)
+    try:
+        if "GCP_SERVICE_ACCOUNT" not in st.secrets:
+            st.error("❌ Secret 'GCP_SERVICE_ACCOUNT' não encontrado.")
+            st.stop()
+
+        service_account_info = st.secrets["GCP_SERVICE_ACCOUNT"]
+
+        # --- CORREÇÃO DO STREAMLIT ---
+        # Verifica se veio como string (JSON texto) ou dict (Objeto já convertido)
+        if isinstance(service_account_info, str):
+            info = json.loads(service_account_info)
+        else:
+            info = service_account_info
+        # -----------------------------
+
         creds = service_account.Credentials.from_service_account_info(info)
         return bigquery.Client(credentials=creds, project=info['project_id'])
+        
+    except Exception as e:
+        st.error(f"Erro de Autenticação: {e}")
+        st.stop()
 
 client = get_bq_client()
 
 # --- CARGA DE DADOS ---
 @st.cache_data(ttl=600)
 def load_data():
-    # 1. View Consolidada (Já processada com mensais)
-    # nosec: Query estática, segura.
+    # 1. View Consolidada
     query_view = "SELECT * FROM `cartola_analytics.view_consolidada_times`"
     df_view = client.query(query_view).to_dataframe()
     
     # 2. Metadados da Rodada Atual
-    # nosec: Query estática, segura.
     query_meta = """
         SELECT MAX(rodada) as rodada_atual, 
                (SELECT Mensal FROM `cartola_analytics.Rodada_Mensal` 
@@ -59,10 +77,11 @@ def load_data():
 
     return df_view, rodada, mes_raw, col_mes
 
-df_view, rodada_atual, nome_mes_atual, col_mes_atual = load_data()
+# Carrega os dados com spinner
+with st.spinner('Carregando dados do Cartola...'):
+    df_view, rodada_atual, nome_mes_atual, col_mes_atual = load_data()
 
 # --- LÓGICA DE NEGÓCIO ---
-# Regra do Turno: R19 inicia o 2º Turno
 is_segundo_turno = rodada_atual >= 19
 coluna_turno = 'pontos_turno_2' if is_segundo_turno else 'pontos_turno_1'
 nome_turno = "2º Turno" if is_segundo_turno else "1º Turno"
@@ -102,61 +121,4 @@ with c3:
 
 with c4:
     st.markdown("### 🐢 Zicada")
-    st.metric("Menor Pontuação (Zica)", top_zicada['nome'], f"{top_zicada['menor_pontuacao']:.1f}", delta_color="inverse")
-
-st.markdown("---")
-
-# --- GRÁFICOS TOP 5 ---
-st.subheader("📊 Classificação Top 5")
-tab1, tab2, tab3 = st.tabs(["🌎 Geral", f"🔄 {nome_turno}", f"📅 Mensal ({nome_mes_atual})"])
-
-def plot_top5(df, y_col, color_col, title):
-    df_top = df.sort_values(y_col, ascending=False).head(5)
-    fig = px.bar(
-        df_top, x=y_col, y='nome', text=y_col, orientation='h',
-        color=color_col, color_continuous_scale='Greens', title=title
-    )
-    fig.update_layout(yaxis={'categoryorder':'total ascending'}, showlegend=False)
-    fig.update_traces(texttemplate='%{text:.1f}', textposition='outside')
-    return fig
-
-with tab1: st.plotly_chart(plot_top5(df_view, 'total_geral', 'total_geral', "Top 5 Geral"), use_container_width=True)
-with tab2: st.plotly_chart(plot_top5(df_view, coluna_turno, coluna_turno, f"Top 5 - {nome_turno}"), use_container_width=True)
-with tab3: st.plotly_chart(plot_top5(df_view, col_mes_atual, col_mes_atual, f"Top 5 - {nome_mes_atual}"), use_container_width=True)
-
-# --- TABELA COMPLETA ---
-st.markdown("---")
-with st.expander("📋 Ver Tabela Completa (Todos os Meses)", expanded=False):
-    # Mostra primeiro as colunas principais e depois as mensais restantes
-    st.dataframe(
-        df_view.style.format("{:.1f}", subset=df_view.select_dtypes(include='number').columns)
-               .background_gradient(subset=['total_geral'], cmap='Greens'),
-        use_container_width=True
-    )
-
-# --- RAIO-X (DETALHADO) ---
-st.markdown("---")
-st.subheader("🔬 Raio-X Detalhado (Escalações)")
-filtro_rodada = st.selectbox("Escolha a Rodada:", sorted(range(1, rodada_atual + 1), reverse=True))
-
-@st.cache_data
-def get_escalacoes(rodada):
-    # ATENÇÃO: Adicionado '# nosec' para passar no teste de segurança CI/CD
-    # O bandit reclama de f-string em SQL, mas aqui a variável 'rodada' vem de um selectbox seguro.
-    q = f""" 
-        SELECT liga_time_nome as Time, atleta_apelido as Jogador, atleta_posicao as Posicao, 
-               pontos as Pontos, is_capitao as Capitao
-        FROM `cartola_analytics.times_escalacoes`
-        WHERE rodada = {rodada}
-        ORDER BY Time, Pontos DESC
-    """ # nosec
-    return client.query(q).to_dataframe()
-
-df_detalhe = get_escalacoes(filtro_rodada)
-
-st.dataframe(
-    df_detalhe.style.format({"Pontos": "{:.1f}"})
-              .applymap(lambda x: "background-color: #d1e7dd; font-weight: bold" if x else "", subset=['Capitao']),
-    use_container_width=True,
-    hide_index=True
-)
+    st.metric("Menor Pontuação (Zica)", top_zicada['nome'], f"{top_zicada['menor_pontuacao']:.1
