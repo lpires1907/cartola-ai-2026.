@@ -16,73 +16,34 @@ TAB_ESCALACOES = f"{DATASET_ID}.times_escalacoes"
 TAB_ATLETAS = f"{DATASET_ID}.atletas_globais"
 
 GCP_JSON = os.getenv('GCP_SERVICE_ACCOUNT')
-# AQUI: Coloque seu Cookie 'glbId' (que dura meses)
-COOKIE_SECRET = os.getenv('CARTOLA_GLBID') 
+# ATENÇÃO: Esta variável deve conter o TOKEN BEARER (o código que começa com eyJ...)
+TOKEN_SECRET = os.getenv('CARTOLA_GLBID') 
 TIMEOUT = 30 
 
-# --- 1. GERADOR DE TOKEN (MODO GENÉRICO) ---
-def gerar_token_pro_automatico(cookie_str):
-    if not cookie_str: return None
-
-    print("🔄 Tentando gerar Token via ServiceID Genérico...")
-    
-    # 1. Extrai glbId
-    glb_id_val = ""
-    try:
-        if "glbId=" in cookie_str:
-            glb_id_val = cookie_str.split("glbId=")[1].split(";")[0]
-        else:
-            glb_id_val = cookie_str.strip()
-    except:
+# --- 1. GERENCIAMENTO DE HEADERS (MODO OIDC) ---
+def get_pro_headers():
+    """
+    Replica exatamente os headers do cURL capturado.
+    """
+    if not TOKEN_SECRET:
         return None
 
-    # 2. Bate na API com ID Genérico (438 em vez de 4728)
-    url_auth = "https://login.globo.com/api/authentication"
+    # Tratamento: Se o usuário colou "Bearer eyJ...", removemos o "Bearer " duplicado
+    token_limpo = TOKEN_SECRET.replace("Bearer ", "").strip()
     
-    payload = {
-        "payload": {
-            "serviceId": 438,  # <--- MUDANÇA AQUI (ID Genérico da Globo)
-            "glbId": glb_id_val
-        }
-    }
-    
-    headers_login = {
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Origin": "https://www.globo.com", # <--- Mudamos a origem também
-        "Referer": "https://www.globo.com/",
-    }
+    # Remove aspas se houver
+    token_limpo = token_limpo.strip('"').strip("'")
 
-    try:
-        res = requests.post(url_auth, json=payload, headers=headers_login, timeout=15)
-        
-        if res.status_code == 200:
-            data = res.json()
-            if "id" in data:
-                print(f"✅ Token gerado! (Genérico)")
-                return data["id"]
-            else:
-                print(f"⚠️ Resposta sem token: {data}")
-        else:
-            print(f"⚠️ Falha ({res.status_code}): {res.text[:100]}")
-            
-    except Exception as e:
-        print(f"❌ Erro de conexão: {e}")
-
-    return None
-
-# --- 2. GERENCIAMENTO DE HEADERS ---
-def get_headers_com_token(token):
     return {
         'authority': 'api.cartola.globo.com',
         'accept': 'application/json',
         'accept-language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
-        'authorization': f'Bearer {token}',
+        'authorization': f'Bearer {token_limpo}',  # O Segredo aqui!
         'origin': 'https://cartola.globo.com',
         'referer': 'https://cartola.globo.com/',
         'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'x-glb-app': 'cartola_web',
-        'x-glb-auth': 'oidc',
+        'x-glb-app': 'cartola_web',  # CRUCIAL: Identifica a aplicação
+        'x-glb-auth': 'oidc',        # CRUCIAL: Tipo de auth
         'sec-fetch-site': 'same-site',
         'sec-fetch-mode': 'cors',
         'sec-fetch-dest': 'empty'
@@ -94,7 +55,7 @@ def get_public_headers():
         'Accept': 'application/json'
     }
 
-# --- 3. INFRAESTRUTURA ---
+# --- 2. INFRAESTRUTURA ---
 def get_bq_client():
     if not GCP_JSON: raise ValueError("GCP_SERVICE_ACCOUNT ausente.")
     try:
@@ -110,7 +71,7 @@ def garantir_dataset(client):
 
 def limpar_dados_rodada(client, rodada):
     print(f"🧹 Limpando dados da Rodada {rodada}...")
-    # CORREÇÃO BANDIT: nosec na mesma linha
+    # CORREÇÃO BANDIT: O comentário # nosec deve ficar NA MESMA LINHA
     sqls = [f"DELETE FROM `{client.project}.{t}` WHERE rodada = {rodada}" for t in [TAB_HISTORICO, TAB_ESCALACOES, TAB_ATLETAS]] # nosec
     for sql in sqls:
         try: client.query(sql).result()
@@ -122,27 +83,31 @@ def salvar_bigquery(client, df, tabela, schema):
     client.load_table_from_dataframe(df, f"{client.project}.{tabela}", job_config=job_config).result()
     print(f"✅ Salvo em {tabela}")
 
-# --- 4. API INTELIGENTE ---
-def get_dados_time_smart(time_id, rodada, is_live, token_valido):
-    url = f"https://api.cartola.globo.com/time/parcial/{time_id}" if is_live else f"https://api.cartola.globo.com/time/id/{time_id}/{rodada}"
+# --- 3. API INTELIGENTE ---
+def get_dados_time_smart(time_id, rodada, is_live):
+    url_parcial = f"https://api.cartola.globo.com/time/parcial/{time_id}"
+    url_oficial = f"https://api.cartola.globo.com/time/id/{time_id}/{rodada}"
+    url = url_parcial if is_live else url_oficial
+    
     try:
-        if token_valido:
-            headers = get_headers_com_token(token_valido)
+        # Tenta acesso PRO (Bearer Token)
+        headers = get_pro_headers()
+        if headers:
             res = requests.get(url, headers=headers, timeout=TIMEOUT)
             if res.status_code == 200: return res.json()
         
+        # Fallback Público
         res = requests.get(url, headers=get_public_headers(), timeout=TIMEOUT)
         return res.json() if res.status_code == 200 else {'pontos': 0, 'atletas': []}
     except: return {'pontos': 0, 'atletas': []}
 
-# --- 5. EXECUÇÃO PRINCIPAL ---
+# --- 4. EXECUÇÃO PRINCIPAL ---
 def rodar_coleta():
-    if not COOKIE_SECRET:
-        print("⚠️ AVISO: Sem Cookie configurado.")
-        token_ativo = None
+    if not TOKEN_SECRET:
+        print("⚠️ AVISO: Variável CARTOLA_GLBID vazia.")
     else:
-        # Tenta gerar o token fresco
-        token_ativo = gerar_token_pro_automatico(COOKIE_SECRET)
+        # Mostra o início do token para confirmação
+        print(f"🔑 Token carregado: {TOKEN_SECRET[:10]}...")
     
     client = get_bq_client()
     garantir_dataset(client)
@@ -162,30 +127,25 @@ def rodar_coleta():
     
     print(f"🔄 Rodada Alvo: {rodada_alvo} ({tipo_dado})")
 
-    # 2. BUSCA DA LIGA
+    # 2. BUSCA DA LIGA (O Teste de Fogo)
     print(f"🌍 Acessando liga: {LIGA_SLUG}")
     
-    headers_liga = get_public_headers()
-    url_liga = f"https://api.cartola.globo.com/liga/{LIGA_SLUG}"
+    url_auth = f"https://api.cartola.globo.com/auth/liga/{LIGA_SLUG}?orderBy=campeonato&page=1"
+    headers_pro = get_pro_headers()
     
-    if token_ativo:
-        url_liga = f"https://api.cartola.globo.com/auth/liga/{LIGA_SLUG}?orderBy=campeonato&page=1"
-        headers_liga = get_headers_com_token(token_ativo)
-    
-    res_liga = requests.get(url_liga, headers=headers_liga, timeout=TIMEOUT)
+    # Faz a requisição IDENTICA ao cURL
+    res_liga = requests.get(url_auth, headers=headers_pro, timeout=TIMEOUT)
     
     if res_liga.status_code == 200:
-        modo = "PRO (Autenticado)" if token_ativo else "Público"
-        print(f"✅ Acesso confirmado! Modo: {modo}")
+        print("✅ SUCESSO! Acesso PRO confirmado via Bearer Token.")
     else:
-        print(f"❌ Falha no acesso ({res_liga.status_code})...")
-        if token_ativo:
-            print("⚠️ Tentando fallback público...")
-            url_pub = f"https://api.cartola.globo.com/liga/{LIGA_SLUG}"
-            res_liga = requests.get(url_pub, headers=get_public_headers(), timeout=TIMEOUT)
+        print(f"❌ Falha PRO ({res_liga.status_code}): {res_liga.text[:200]}")
+        print("⚠️ Tentando rota pública como última esperança...")
+        url_pub = f"https://api.cartola.globo.com/liga/{LIGA_SLUG}"
+        res_liga = requests.get(url_pub, headers=get_public_headers(), timeout=TIMEOUT)
 
-    if res_liga is None or res_liga.status_code != 200:
-        print(f"❌ Erro final ({res_liga.status_code if res_liga else 'N/A'}).")
+    if res_liga.status_code != 200:
+        print(f"❌ Erro final ({res_liga.status_code}). Verifique se o Token expirou.")
         return
 
     times_liga = res_liga.json().get('times', [])
@@ -197,7 +157,7 @@ def rodar_coleta():
 
     for time_obj in times_liga:
         nome_time = time_obj['nome']
-        dados_time = get_dados_time_smart(time_obj['time_id'], rodada_alvo, is_live, token_ativo)
+        dados_time = get_dados_time_smart(time_obj['time_id'], rodada_alvo, is_live)
         
         pts = dados_time.get('pontos')
         if pts is None: pts = time_obj.get('pontos', {}).get('rodada', 0.0)
