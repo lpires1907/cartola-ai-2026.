@@ -20,8 +20,7 @@ st.markdown("""
 # --- FUNÇÃO AUXILIAR DE SEGURANÇA ---
 def safe_get(value):
     """
-    Garante que o valor retornado seja um escalar (número ou string única),
-    mesmo que o Pandas retorne uma Series (lista) devido a duplicatas.
+    Garante que o valor retornado seja um escalar (número ou string única).
     """
     if isinstance(value, pd.Series):
         if value.empty:
@@ -103,11 +102,10 @@ def load_data():
         st.error(f"Erro ao carregar dados: {e}")
         return pd.DataFrame(), 0, "Erro", "total_geral"
 
-# --- NOVA FUNÇÃO: CARREGA O NARRADOR ---
+# --- CARREGA O NARRADOR ---
 @st.cache_data(ttl=600)
 def load_corneta(rodada):
     try:
-        # Busca o comentário mais recente desta rodada
         q = f"""
             SELECT texto, tipo 
             FROM `cartola_analytics.comentarios_ia` 
@@ -122,7 +120,7 @@ def load_corneta(rodada):
 # Carrega Dados
 with st.spinner('Carregando dados do Cartola...'):
     df_view, rodada_atual, nome_mes_atual, col_mes_atual = load_data()
-    df_corneta = load_corneta(rodada_atual) # Carrega a corneta aqui
+    df_corneta = load_corneta(rodada_atual)
 
 if df_view.empty:
     st.warning("⚠️ Nenhum dado encontrado no BigQuery. Rode o coletor para popular a tabela.")
@@ -133,72 +131,86 @@ is_segundo_turno = rodada_atual >= 19
 coluna_turno = 'pontos_turno_2' if is_segundo_turno else 'pontos_turno_1'
 nome_turno = "2º Turno" if is_segundo_turno else "1º Turno"
 
+# Ordenações
 top_geral = df_view.sort_values('total_geral', ascending=False)
 top_turno = df_view.sort_values(coluna_turno, ascending=False)
+top_mes = df_view.sort_values(col_mes_atual, ascending=False)
 top_mitada = df_view.sort_values('maior_pontuacao', ascending=False).iloc[0] if not df_view.empty else None
-top_zicada = df_view.sort_values('menor_pontuacao', ascending=True).iloc[0] if not df_view.empty else None
+
+# === ZICADA CORRIGIDA (Ignora 0.0) ===
+df_zica_validos = df_view[df_view['menor_pontuacao'] > 0]
+if not df_zica_validos.empty:
+    top_zicada = df_zica_validos.sort_values('menor_pontuacao', ascending=True).iloc[0]
+else:
+    top_zicada = None
+# ======================================
 
 # --- CABEÇALHO E NARRADOR ---
 st.title(f"🏆 Cartola Analytics - Rodada {rodada_atual}")
 
-# === AQUI ESTÁ A NOVIDADE: EXIBIÇÃO DO NARRADOR ===
 if not df_corneta.empty:
     with st.container():
         for _, row in df_corneta.iterrows():
             icon = "🎙️" if row['tipo'] == 'RODADA' else "🧠"
             st.info(f"**Narrador IA ({icon}):** {row['texto']}")
-# ===================================================
 
 st.markdown("---")
 
 # --- DESTAQUES (KPIs) ---
-c1, c2, c3, c4 = st.columns(4)
+c1, c2, c3, c4, c5 = st.columns(5)
 tem_dados = len(top_geral) >= 2
 
+# 1. GERAL
 with c1:
     st.markdown("### 🥇 Geral")
     if tem_dados:
         lider = top_geral.iloc[0]
         vice = top_geral.iloc[1]
-        
-        nome_lider = str(safe_get(lider['nome']))
-        nome_vice = str(safe_get(vice['nome']))
-        val_lider = float(safe_get(lider['total_geral']))
-        val_vice = float(safe_get(vice['total_geral']))
-        delta_val = val_vice - val_lider
-        
-        st.metric(label="Líder", value=nome_lider, delta=f"{val_lider:.1f} pts")
-        st.metric(label="Vice", value=nome_vice, delta=f"{delta_val:.1f} pts")
+        st.metric(label="Líder", value=str(safe_get(lider['nome'])), 
+                  delta=f"Total: {float(safe_get(lider['total_geral'])):.1f}", delta_color="off")
+        st.metric(label="Vice", value=str(safe_get(vice['nome'])), 
+                  delta=f"Total: {float(safe_get(vice['total_geral'])):.1f}", delta_color="off")
     elif len(top_geral) == 1:
-        lider = top_geral.iloc[0]
-        st.metric(label="Líder", value=str(safe_get(lider['nome'])), delta=f"{float(safe_get(lider['total_geral'])):.1f} pts")
+        st.metric(label="Líder", value=str(safe_get(top_geral.iloc[0]['nome'])), 
+                  delta=f"{float(safe_get(top_geral.iloc[0]['total_geral'])):.1f} pts", delta_color="off")
 
+# 2. TURNO
 with c2:
     st.markdown(f"### 🥈 {nome_turno}")
     if tem_dados:
         lider_t = top_turno.iloc[0]
         vice_t = top_turno.iloc[1]
-        
-        nome_lider_t = str(safe_get(lider_t['nome']))
-        nome_vice_t = str(safe_get(vice_t['nome']))
-        val_lider_t = float(safe_get(lider_t[coluna_turno]))
-        val_vice_t = float(safe_get(vice_t[coluna_turno]))
-        delta_t = val_vice_t - val_lider_t
-        
-        st.metric(label="Líder", value=nome_lider_t, delta=f"{val_lider_t:.1f} pts")
-        st.metric(label="Vice", value=nome_vice_t, delta=f"{delta_t:.1f} pts")
+        st.metric(label="Líder", value=str(safe_get(lider_t['nome'])), 
+                  delta=f"Total: {float(safe_get(lider_t[coluna_turno])):.1f}", delta_color="off")
+        st.metric(label="Vice", value=str(safe_get(vice_t['nome'])), 
+                  delta=f"Total: {float(safe_get(vice_t[coluna_turno])):.1f}", delta_color="off")
 
+# 3. MÊS
 with c3:
+    st.markdown(f"### 📅 {nome_mes_atual}")
+    if tem_dados:
+        lider_m = top_mes.iloc[0]
+        vice_m = top_mes.iloc[1]
+        st.metric(label="Líder", value=str(safe_get(lider_m['nome'])), 
+                  delta=f"Total: {float(safe_get(lider_m[col_mes_atual])):.1f}", delta_color="off")
+        st.metric(label="Vice", value=str(safe_get(vice_m['nome'])), 
+                  delta=f"Total: {float(safe_get(vice_m[col_mes_atual])):.1f}", delta_color="off")
+
+# 4. MITADA
+with c4:
     st.markdown("### 🚀 Mitada")
     if top_mitada is not None:
         val_mitada = float(safe_get(top_mitada['maior_pontuacao']))
-        st.metric(label="Maior Pontuação", value=str(safe_get(top_mitada['nome'])), delta=f"{val_mitada:.1f} pts")
+        st.metric(label="Maior Pontuação", value=str(safe_get(top_mitada['nome'])), 
+                  delta=f"{val_mitada:.1f} pts")
 
-with c4:
+# 5. ZICADA
+with c5:
     st.markdown("### 🐢 Zicada")
     if top_zicada is not None:
         val_zica = float(safe_get(top_zicada['menor_pontuacao']))
-        st.metric(label="Menor Pontuação", value=str(safe_get(top_zicada['nome'])), delta=f"{val_zica:.1f} pts", delta_color="inverse")
+        st.metric(label="Menor Pontuação (>0)", value=str(safe_get(top_zicada['nome'])), 
+                  delta=f"{val_zica:.1f} pts", delta_color="inverse")
 
 st.markdown("---")
 
@@ -231,7 +243,6 @@ with st.expander("📋 Ver Tabela Completa (Todos os Meses)", expanded=False):
     df_display = df_view.copy()
     df_display = df_display.loc[:, ~df_display.columns.duplicated()]
     
-    # Solução híbrida: Tenta usar Matplotlib se tiver, senão usa formatação nativa
     try:
         import matplotlib
         st.dataframe(
@@ -240,7 +251,6 @@ with st.expander("📋 Ver Tabela Completa (Todos os Meses)", expanded=False):
             use_container_width=True
         )
     except ImportError:
-        # Fallback se matplotlib não estiver instalado
         st.dataframe(df_display, use_container_width=True)
 
 # --- RAIO-X ---
