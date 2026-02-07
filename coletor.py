@@ -20,58 +20,66 @@ GCP_JSON = os.getenv('GCP_SERVICE_ACCOUNT')
 COOKIE_SECRET = os.getenv('CARTOLA_GLBID') 
 TIMEOUT = 30 
 
-# --- 1. GERADOR DE TOKEN AUTOMÁTICO ---
+# --- 1. GERADOR DE TOKEN (MODO STEALTH/CAMUFLADO) ---
 def gerar_token_pro_automatico(cookie_str):
     """
-    Usa o Cookie glbId (longa duração) para gerar um Bearer Token (curta duração).
-    Simula o refresh de sessão do navegador.
+    Usa o Cookie glbId para gerar um Bearer Token.
+    Inclui headers 'Client Hints' para evitar o erro 406 (Captcha).
     """
     if not cookie_str: return None
 
-    print("🔄 Tentando gerar Bearer Token fresco via Cookie...")
+    print("🔄 Tentando gerar Bearer Token fresco (Modo Stealth)...")
     
-    # 1. Extrai apenas o valor do glbId da string suja
+    # 1. Extrai apenas o valor do glbId
     glb_id_val = ""
     try:
         if "glbId=" in cookie_str:
             # Pega o que está entre 'glbId=' e o próximo ';'
             glb_id_val = cookie_str.split("glbId=")[1].split(";")[0]
         else:
-            # Assume que a string inteira é o glbId
             glb_id_val = cookie_str.strip()
     except:
         print("⚠️ Falha ao extrair glbId da string.")
         return None
 
-    # 2. Bate na API de Autenticação da Globo para trocar Cookie por Token
+    # 2. Bate na API de Autenticação com CAMUFLAGEM DE BROWSER
     url_auth = "https://login.globo.com/api/authentication"
     
     payload = {
         "payload": {
-            "serviceId": 4728,  # ID do Cartola
+            "serviceId": 4728,
             "glbId": glb_id_val
         }
     }
     
-    headers = {
+    # HEADERS AVANÇADOS PARA EVITAR CAPTCHA
+    headers_login = {
         "Content-Type": "application/json",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Origin": "https://cartola.globo.com",
-        "Referer": "https://cartola.globo.com/"
+        "Referer": "https://cartola.globo.com/",
+        # Client Hints (Dizem: "Sou um Chrome real no Windows")
+        "sec-ch-ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-site"
     }
 
     try:
-        res = requests.post(url_auth, json=payload, headers=headers, timeout=10)
+        res = requests.post(url_auth, json=payload, headers=headers_login, timeout=15)
         
         if res.status_code == 200:
             data = res.json()
-            if "id" in data: # 'id' aqui é o Token JWT/Bearer
+            if "id" in data:
                 token_novo = data["id"]
                 print(f"✅ Token gerado com sucesso! (Inicia com: {token_novo[:10]}...)")
                 return token_novo
             else:
                 print(f"⚠️ Resposta da auth sem token: {data}")
         else:
+            # Se der 406 de novo, logamos o erro mas tentamos seguir com o cookie antigo
             print(f"⚠️ Falha na renovação do token ({res.status_code}): {res.text[:100]}")
             
     except Exception as e:
@@ -85,7 +93,7 @@ def get_headers_com_token(token):
         'authority': 'api.cartola.globo.com',
         'accept': 'application/json',
         'accept-language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
-        'authorization': f'Bearer {token}',  # Token gerado na hora!
+        'authorization': f'Bearer {token}',
         'origin': 'https://cartola.globo.com',
         'referer': 'https://cartola.globo.com/',
         'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
@@ -118,7 +126,7 @@ def garantir_dataset(client):
 
 def limpar_dados_rodada(client, rodada):
     print(f"🧹 Limpando dados da Rodada {rodada}...")
-    # CORREÇÃO BANDIT: Comentário na mesma linha
+    # CORREÇÃO BANDIT: nosec na mesma linha
     sqls = [f"DELETE FROM `{client.project}.{t}` WHERE rodada = {rodada}" for t in [TAB_HISTORICO, TAB_ESCALACOES, TAB_ATLETAS]] # nosec
     for sql in sqls:
         try: client.query(sql).result()
@@ -134,13 +142,11 @@ def salvar_bigquery(client, df, tabela, schema):
 def get_dados_time_smart(time_id, rodada, is_live, token_valido):
     url = f"https://api.cartola.globo.com/time/parcial/{time_id}" if is_live else f"https://api.cartola.globo.com/time/id/{time_id}/{rodada}"
     try:
-        # Se tiver token, usa. Se não, vai de público.
         if token_valido:
             headers = get_headers_com_token(token_valido)
             res = requests.get(url, headers=headers, timeout=TIMEOUT)
             if res.status_code == 200: return res.json()
         
-        # Fallback Público
         res = requests.get(url, headers=get_public_headers(), timeout=TIMEOUT)
         return res.json() if res.status_code == 200 else {'pontos': 0, 'atletas': []}
     except: return {'pontos': 0, 'atletas': []}
@@ -148,10 +154,10 @@ def get_dados_time_smart(time_id, rodada, is_live, token_valido):
 # --- 5. EXECUÇÃO PRINCIPAL ---
 def rodar_coleta():
     if not COOKIE_SECRET:
-        print("⚠️ AVISO: Sem Cookie configurado. Acesso a ligas privadas falhará.")
+        print("⚠️ AVISO: Sem Cookie configurado.")
         token_ativo = None
     else:
-        # Tenta gerar o token fresco antes de começar
+        # Tenta gerar o token fresco
         token_ativo = gerar_token_pro_automatico(COOKIE_SECRET)
     
     client = get_bq_client()
@@ -178,7 +184,6 @@ def rodar_coleta():
     headers_liga = get_public_headers()
     url_liga = f"https://api.cartola.globo.com/liga/{LIGA_SLUG}"
     
-    # Se conseguiu gerar token, usa a rota autenticada
     if token_ativo:
         url_liga = f"https://api.cartola.globo.com/auth/liga/{LIGA_SLUG}?orderBy=campeonato&page=1"
         headers_liga = get_headers_com_token(token_ativo)
@@ -190,7 +195,6 @@ def rodar_coleta():
         print(f"✅ Acesso confirmado! Modo: {modo}")
     else:
         print(f"❌ Falha no acesso ({res_liga.status_code})...")
-        # Se falhou com token, tenta fallback público
         if token_ativo:
             print("⚠️ Tentando fallback público...")
             url_pub = f"https://api.cartola.globo.com/liga/{LIGA_SLUG}"
