@@ -20,19 +20,16 @@ st.markdown("""
 # --- CONEXÃO BQ (BLINDADA) ---
 @st.cache_resource
 def get_bq_client():
-    # 1. Tenta credenciais locais (desenvolvimento)
     if os.path.exists("credentials.json"):
         return bigquery.Client.from_service_account_json("credentials.json")
     
-    # 2. Tenta Secrets do Streamlit (Produção)
     try:
         if "GCP_SERVICE_ACCOUNT" not in st.secrets:
             st.error("❌ Secret 'GCP_SERVICE_ACCOUNT' não encontrado.")
             st.stop()
 
         service_account_info = st.secrets["GCP_SERVICE_ACCOUNT"]
-
-        # Verifica se veio como string (JSON texto) ou dict (Objeto já convertido)
+        
         if isinstance(service_account_info, str):
             info = json.loads(service_account_info)
         else:
@@ -55,7 +52,12 @@ def load_data():
         query_view = "SELECT * FROM `cartola_analytics.view_consolidada_times`"
         df_view = client.query(query_view).to_dataframe()
         
-        # --- LIMPEZA DE TIPOS (Evita TypeError) ---
+        # --- CORREÇÃO CRÍTICA 1: REMOVER COLUNAS DUPLICADAS ---
+        # Se o SELECT * trouxer colunas repetidas (ex: id, rodada), o Pandas cria nomes duplicados
+        # e o acesso vira uma Series (lista) em vez de um número, quebrando o app.
+        df_view = df_view.loc[:, ~df_view.columns.duplicated()]
+        
+        # --- CORREÇÃO CRÍTICA 2: FORÇAR TIPOS NUMÉRICOS ---
         cols_numericas = ['total_geral', 'pontos_turno_1', 'pontos_turno_2', 'maior_pontuacao', 'menor_pontuacao']
         
         for col in cols_numericas:
@@ -64,11 +66,9 @@ def load_data():
             else:
                 df_view[col] = pd.to_numeric(df_view[col], errors='coerce').fillna(0.0)
 
-        # Limpeza dinâmica para meses
         cols_meses = [c for c in df_view.columns if 'pontos_' in c]
         for col in cols_meses:
              df_view[col] = pd.to_numeric(df_view[col], errors='coerce').fillna(0.0)
-        # ------------------------------------------
 
         # 2. Metadados da Rodada Atual
         query_meta = """
@@ -96,7 +96,6 @@ def load_data():
 
 # Carrega os dados
 with st.spinner('Carregando dados do Cartola...'):
-    # A LINHA DO ERRO FOI CORRIGIDA ABAIXO (AGORA TEM A ATRIBUIÇÃO):
     df_view, rodada_atual, nome_mes_atual, col_mes_atual = load_data()
 
 if df_view.empty:
@@ -127,31 +126,42 @@ with c1:
     if tem_dados:
         lider = top_geral.iloc[0]
         vice = top_geral.iloc[1]
-        st.metric("Líder", lider['nome'], f"{lider['total_geral']:.1f}")
-        delta_val = vice['total_geral'] - lider['total_geral']
-        st.metric("Vice", vice['nome'], f"{vice['total_geral']:.1f}", delta=f"{delta_val:.1f}")
+        
+        # GARANTIA EXTRA: Converte explicitamente para float na hora de usar
+        val_lider = float(lider['total_geral'])
+        val_vice = float(vice['total_geral'])
+        delta_val = val_vice - val_lider
+        
+        st.metric("Líder", lider['nome'], f"{val_lider:.1f}")
+        st.metric("Vice", vice['nome'], f"{val_vice:.1f}", delta=f"{delta_val:.1f}")
     elif len(top_geral) == 1:
-        st.metric("Líder", top_geral.iloc[0]['nome'], f"{top_geral.iloc[0]['total_geral']:.1f}")
+        val_lider = float(top_geral.iloc[0]['total_geral'])
+        st.metric("Líder", top_geral.iloc[0]['nome'], f"{val_lider:.1f}")
 
 with c2:
     st.markdown(f"### 🥈 {nome_turno}")
     if tem_dados:
         lider_t = top_turno.iloc[0]
         vice_t = top_turno.iloc[1]
-        pts_lider = lider_t[coluna_turno]
-        pts_vice = vice_t[coluna_turno]
-        st.metric("Líder", lider_t['nome'], f"{pts_lider:.1f}")
-        st.metric("Vice", vice_t['nome'], f"{pts_vice:.1f}", delta=f"{pts_vice - pts_lider:.1f}")
+        
+        val_lider_t = float(lider_t[coluna_turno])
+        val_vice_t = float(vice_t[coluna_turno])
+        delta_t = val_vice_t - val_lider_t
+        
+        st.metric("Líder", lider_t['nome'], f"{val_lider_t:.1f}")
+        st.metric("Vice", vice_t['nome'], f"{val_vice_t:.1f}", delta=f"{delta_t:.1f}")
 
 with c3:
     st.markdown("### 🚀 Mitada")
     if top_mitada is not None:
-        st.metric("Maior Pontuação", top_mitada['nome'], f"{top_mitada['maior_pontuacao']:.1f}")
+        val_mitada = float(top_mitada['maior_pontuacao'])
+        st.metric("Maior Pontuação", top_mitada['nome'], f"{val_mitada:.1f}")
 
 with c4:
     st.markdown("### 🐢 Zicada")
     if top_zicada is not None:
-        st.metric("Menor Pontuação (Zica)", top_zicada['nome'], f"{top_zicada['menor_pontuacao']:.1f}", delta_color="inverse")
+        val_zica = float(top_zicada['menor_pontuacao'])
+        st.metric("Menor Pontuação (Zica)", top_zicada['nome'], f"{val_zica:.1f}", delta_color="inverse")
 
 st.markdown("---")
 
@@ -190,7 +200,6 @@ filtro_rodada = st.selectbox("Escolha a Rodada:", sorted(range(1, rodada_atual +
 
 @st.cache_data
 def get_escalacoes(rodada):
-    # Query segura para o Bandit ignorar
     q = f"""
         SELECT liga_time_nome as Time, atleta_apelido as Jogador, atleta_posicao as Posicao, 
                pontos as Pontos, is_capitao as Capitao
