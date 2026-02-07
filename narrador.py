@@ -6,10 +6,14 @@ from google.oauth2 import service_account
 from datetime import datetime
 import pytz
 from google import genai 
-from dotenv import load_dotenv
 
-# Carrega ambiente local se necessário
-load_dotenv()
+# --- IMPORTAÇÃO SEGURA DO DOTENV ---
+# Isso permite rodar na Nuvem (onde não tem .env) sem quebrar o código
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass # Se não tiver a biblioteca (ambiente Cloud), segue a vida usando Secrets
 
 # --- CONFIGURAÇÕES ---
 GEMINI_KEY = os.getenv('GEMINI_API_KEY')
@@ -92,7 +96,6 @@ def gerar_analise_geral(df_view, rodada_atual):
     lider_geral = df_view.iloc[0]
     vice_geral = df_view.iloc[1] if len(df_view) > 1 else None
     
-    # Previne erro se estiver vazio
     if lider_geral is None: return None
 
     maior_media = df_view.sort_values('media', ascending=False).iloc[0]
@@ -131,7 +134,7 @@ def salvar_comentario(client, texto, rodada, tipo, ts):
     except Exception as e:
         print(f"❌ Erro ao salvar comentário: {e}")
 
-# --- FUNÇÃO PRINCIPAL (RENOMEADA PARA COMPATIBILIDADE) ---
+# --- FUNÇÃO PRINCIPAL ---
 def gerar_narracao_rodada():
     """
     Função principal chamada pelo main.py
@@ -157,6 +160,7 @@ def gerar_narracao_rodada():
 
         # 1. Micro Análise (Rodada)
         if not ja_comentou(client, rodada_atual, 'RODADA'):
+            # nosec: query simples
             df_round = client.query(f"SELECT * FROM `{client.project}.{TAB_HISTORICO}` WHERE rodada = {rodada_atual} ORDER BY pontos DESC").to_dataframe() # nosec
             texto = gerar_analise_rodada(df_round, rodada_atual, status_dados)
             if texto:
@@ -168,7 +172,7 @@ def gerar_narracao_rodada():
         # 2. Macro Análise (Geral - Apenas se for oficial)
         if status_dados == 'OFICIAL' and not ja_comentou(client, rodada_atual, 'GERAL'):
             try:
-                # Importante: Usa a View Consolidada que o processamento.py acabou de recriar
+                # Importante: Usa a View Consolidada
                 df_view = client.query(f"SELECT * FROM `{client.project}.{VIEW_CONSOLIDADA}` ORDER BY total_geral DESC").to_dataframe() # nosec
                 texto_geral = gerar_analise_geral(df_view, rodada_atual)
                 if texto_geral:
@@ -177,10 +181,7 @@ def gerar_narracao_rodada():
             except Exception as e:
                 print(f"⚠️ Erro na análise geral: {e}")
         else:
-            if status_dados != 'OFICIAL':
-                print("⏳ Aguardando fechamento oficial para análise geral.")
-            else:
-                print("💤 Análise geral já foi feita.")
+            print("💤 Análise geral já feita ou aguardando oficialização.")
 
     except Exception as e:
         print(f"❌ O Narrador engasgou: {e}")
