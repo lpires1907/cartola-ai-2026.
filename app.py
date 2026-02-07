@@ -103,11 +103,10 @@ def load_data():
         st.error(f"Erro ao carregar dados: {e}")
         return pd.DataFrame(), 0, "Erro", "total_geral"
 
-# --- NOVA FUNÇÃO: CARREGA O NARRADOR ---
+# --- CARREGA O NARRADOR ---
 @st.cache_data(ttl=600)
 def load_corneta(rodada):
     try:
-        # Busca o comentário mais recente desta rodada
         q = f"""
             SELECT texto, tipo 
             FROM `cartola_analytics.comentarios_ia` 
@@ -122,7 +121,7 @@ def load_corneta(rodada):
 # Carrega Dados
 with st.spinner('Carregando dados do Cartola...'):
     df_view, rodada_atual, nome_mes_atual, col_mes_atual = load_data()
-    df_corneta = load_corneta(rodada_atual) # Carrega a corneta aqui
+    df_corneta = load_corneta(rodada_atual)
 
 if df_view.empty:
     st.warning("⚠️ Nenhum dado encontrado no BigQuery. Rode o coletor para popular a tabela.")
@@ -141,17 +140,16 @@ top_zicada = df_view.sort_values('menor_pontuacao', ascending=True).iloc[0] if n
 # --- CABEÇALHO E NARRADOR ---
 st.title(f"🏆 Cartola Analytics - Rodada {rodada_atual}")
 
-# === AQUI ESTÁ A NOVIDADE: EXIBIÇÃO DO NARRADOR ===
 if not df_corneta.empty:
     with st.container():
         for _, row in df_corneta.iterrows():
             icon = "🎙️" if row['tipo'] == 'RODADA' else "🧠"
             st.info(f"**Narrador IA ({icon}):** {row['texto']}")
-# ===================================================
 
 st.markdown("---")
 
-# --- DESTAQUES (KPIs) ---
+# --- DESTAQUES (KPIs) AJUSTADOS ---
+# Usamos delta_color="off" para exibir valores absolutos sem setas verdes/vermelhas
 c1, c2, c3, c4 = st.columns(4)
 tem_dados = len(top_geral) >= 2
 
@@ -165,13 +163,13 @@ with c1:
         nome_vice = str(safe_get(vice['nome']))
         val_lider = float(safe_get(lider['total_geral']))
         val_vice = float(safe_get(vice['total_geral']))
-        delta_val = val_vice - val_lider
         
-        st.metric(label="Líder", value=nome_lider, delta=f"{val_lider:.1f} pts")
-        st.metric(label="Vice", value=nome_vice, delta=f"{delta_val:.1f} pts")
+        # Exibe apenas o Total Absoluto em cinza (off)
+        st.metric(label="Líder", value=nome_lider, delta=f"Total: {val_lider:.1f} pts", delta_color="off")
+        st.metric(label="Vice", value=nome_vice, delta=f"Total: {val_vice:.1f} pts", delta_color="off")
     elif len(top_geral) == 1:
         lider = top_geral.iloc[0]
-        st.metric(label="Líder", value=str(safe_get(lider['nome'])), delta=f"{float(safe_get(lider['total_geral'])):.1f} pts")
+        st.metric(label="Líder", value=str(safe_get(lider['nome'])), delta=f"{float(safe_get(lider['total_geral'])):.1f} pts", delta_color="off")
 
 with c2:
     st.markdown(f"### 🥈 {nome_turno}")
@@ -183,21 +181,22 @@ with c2:
         nome_vice_t = str(safe_get(vice_t['nome']))
         val_lider_t = float(safe_get(lider_t[coluna_turno]))
         val_vice_t = float(safe_get(vice_t[coluna_turno]))
-        delta_t = val_vice_t - val_lider_t
         
-        st.metric(label="Líder", value=nome_lider_t, delta=f"{val_lider_t:.1f} pts")
-        st.metric(label="Vice", value=nome_vice_t, delta=f"{delta_t:.1f} pts")
+        st.metric(label="Líder", value=nome_lider_t, delta=f"Total: {val_lider_t:.1f} pts", delta_color="off")
+        st.metric(label="Vice", value=nome_vice_t, delta=f"Total: {val_vice_t:.1f} pts", delta_color="off")
 
 with c3:
     st.markdown("### 🚀 Mitada")
     if top_mitada is not None:
         val_mitada = float(safe_get(top_mitada['maior_pontuacao']))
+        # Aqui mantemos "normal" (verde) pois mitada é sempre positiva e boa
         st.metric(label="Maior Pontuação", value=str(safe_get(top_mitada['nome'])), delta=f"{val_mitada:.1f} pts")
 
 with c4:
     st.markdown("### 🐢 Zicada")
     if top_zicada is not None:
         val_zica = float(safe_get(top_zicada['menor_pontuacao']))
+        # Zica usamos inverse (vermelho) para destacar que foi baixo, ou off se preferir
         st.metric(label="Menor Pontuação", value=str(safe_get(top_zicada['nome'])), delta=f"{val_zica:.1f} pts", delta_color="inverse")
 
 st.markdown("---")
@@ -231,7 +230,6 @@ with st.expander("📋 Ver Tabela Completa (Todos os Meses)", expanded=False):
     df_display = df_view.copy()
     df_display = df_display.loc[:, ~df_display.columns.duplicated()]
     
-    # Solução híbrida: Tenta usar Matplotlib se tiver, senão usa formatação nativa
     try:
         import matplotlib
         st.dataframe(
@@ -240,7 +238,6 @@ with st.expander("📋 Ver Tabela Completa (Todos os Meses)", expanded=False):
             use_container_width=True
         )
     except ImportError:
-        # Fallback se matplotlib não estiver instalado
         st.dataframe(df_display, use_container_width=True)
 
 # --- RAIO-X ---
