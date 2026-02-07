@@ -20,51 +20,37 @@ GCP_JSON = os.getenv('GCP_SERVICE_ACCOUNT')
 COOKIE_SECRET = os.getenv('CARTOLA_GLBID') 
 TIMEOUT = 30 
 
-# --- 1. GERADOR DE TOKEN (MODO STEALTH/CAMUFLADO) ---
+# --- 1. GERADOR DE TOKEN (MODO GENÉRICO) ---
 def gerar_token_pro_automatico(cookie_str):
-    """
-    Usa o Cookie glbId para gerar um Bearer Token.
-    Inclui headers 'Client Hints' para evitar o erro 406 (Captcha).
-    """
     if not cookie_str: return None
 
-    print("🔄 Tentando gerar Bearer Token fresco (Modo Stealth)...")
+    print("🔄 Tentando gerar Token via ServiceID Genérico...")
     
-    # 1. Extrai apenas o valor do glbId
+    # 1. Extrai glbId
     glb_id_val = ""
     try:
         if "glbId=" in cookie_str:
-            # Pega o que está entre 'glbId=' e o próximo ';'
             glb_id_val = cookie_str.split("glbId=")[1].split(";")[0]
         else:
             glb_id_val = cookie_str.strip()
     except:
-        print("⚠️ Falha ao extrair glbId da string.")
         return None
 
-    # 2. Bate na API de Autenticação com CAMUFLAGEM DE BROWSER
+    # 2. Bate na API com ID Genérico (438 em vez de 4728)
     url_auth = "https://login.globo.com/api/authentication"
     
     payload = {
         "payload": {
-            "serviceId": 4728,
+            "serviceId": 438,  # <--- MUDANÇA AQUI (ID Genérico da Globo)
             "glbId": glb_id_val
         }
     }
     
-    # HEADERS AVANÇADOS PARA EVITAR CAPTCHA
     headers_login = {
         "Content-Type": "application/json",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Origin": "https://cartola.globo.com",
-        "Referer": "https://cartola.globo.com/",
-        # Client Hints (Dizem: "Sou um Chrome real no Windows")
-        "sec-ch-ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
-        "sec-ch-ua-mobile": "?0",
-        "sec-ch-ua-platform": '"Windows"',
-        "sec-fetch-dest": "empty",
-        "sec-fetch-mode": "cors",
-        "sec-fetch-site": "same-site"
+        "Origin": "https://www.globo.com", # <--- Mudamos a origem também
+        "Referer": "https://www.globo.com/",
     }
 
     try:
@@ -73,17 +59,15 @@ def gerar_token_pro_automatico(cookie_str):
         if res.status_code == 200:
             data = res.json()
             if "id" in data:
-                token_novo = data["id"]
-                print(f"✅ Token gerado com sucesso! (Inicia com: {token_novo[:10]}...)")
-                return token_novo
+                print(f"✅ Token gerado! (Genérico)")
+                return data["id"]
             else:
-                print(f"⚠️ Resposta da auth sem token: {data}")
+                print(f"⚠️ Resposta sem token: {data}")
         else:
-            # Se der 406 de novo, logamos o erro mas tentamos seguir com o cookie antigo
-            print(f"⚠️ Falha na renovação do token ({res.status_code}): {res.text[:100]}")
+            print(f"⚠️ Falha ({res.status_code}): {res.text[:100]}")
             
     except Exception as e:
-        print(f"❌ Erro ao conectar no login.globo.com: {e}")
+        print(f"❌ Erro de conexão: {e}")
 
     return None
 
