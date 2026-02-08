@@ -7,7 +7,7 @@ import os
 import plotly.express as px
 
 # --- CONFIGURAÇÃO VISUAL ---
-st.set_page_config(page_title="Cartola Analytics 2026", page_icon="⚽", layout="wide")
+st.set_page_config(page_title="Liga SAS Brasil 2026", page_icon="⚽", layout="wide")
 
 # CSS para esconder índices e melhorar visual
 st.markdown("""
@@ -20,7 +20,8 @@ st.markdown("""
 # --- FUNÇÃO AUXILIAR DE SEGURANÇA ---
 def safe_get(value):
     """
-    Garante que o valor retornado seja um escalar (número ou string única).
+    Garante que o valor retornado seja um escalar (número ou string única),
+    mesmo que o Pandas retorne uma Series (lista) devido a duplicatas.
     """
     if isinstance(value, pd.Series):
         if value.empty:
@@ -110,7 +111,7 @@ def load_corneta(rodada):
             SELECT texto, tipo 
             FROM `cartola_analytics.comentarios_ia` 
             WHERE rodada = {rodada}
-            ORDER BY data DESC LIMIT 2
+            ORDER BY data DESC
         """ # nosec
         df = client.query(q).to_dataframe()
         return df
@@ -118,7 +119,7 @@ def load_corneta(rodada):
         return pd.DataFrame()
 
 # Carrega Dados
-with st.spinner('Carregando dados do Cartola...'):
+with st.spinner('Carregando dados da Liga SAS Brasil...'):
     df_view, rodada_atual, nome_mes_atual, col_mes_atual = load_data()
     df_corneta = load_corneta(rodada_atual)
 
@@ -137,22 +138,35 @@ top_turno = df_view.sort_values(coluna_turno, ascending=False)
 top_mes = df_view.sort_values(col_mes_atual, ascending=False)
 top_mitada = df_view.sort_values('maior_pontuacao', ascending=False).iloc[0] if not df_view.empty else None
 
-# === ZICADA CORRIGIDA (Ignora 0.0) ===
+# Zicada corrigida (> 0)
 df_zica_validos = df_view[df_view['menor_pontuacao'] > 0]
 if not df_zica_validos.empty:
     top_zicada = df_zica_validos.sort_values('menor_pontuacao', ascending=True).iloc[0]
 else:
     top_zicada = None
-# ======================================
 
-# --- CABEÇALHO E NARRADOR ---
-st.title(f"🏆 Cartola Analytics - Rodada {rodada_atual}")
+# --- CABEÇALHO ---
+st.title(f"🏆 Cartola Analytics - Liga SAS Brasil 2026 - Rodada {rodada_atual}")
 
+# --- BLOCOS DO NARRADOR (SEPARADOS) ---
 if not df_corneta.empty:
-    with st.container():
-        for _, row in df_corneta.iterrows():
-            icon = "🎙️" if row['tipo'] == 'RODADA' else "🧠"
-            st.info(f"**Narrador IA ({icon}):** {row['texto']}")
+    
+    # Filtra os tipos
+    df_rodada = df_corneta[df_corneta['tipo'] == 'RODADA']
+    df_geral = df_corneta[df_corneta['tipo'] == 'GERAL']
+    
+    # Bloco 1: Narrador da Rodada (Azul/Info)
+    if not df_rodada.empty:
+        st.markdown("### 🎙️ Narrador IA da Rodada")
+        # Pega o texto mais recente (caso tenha duplicatas, pega o primeiro)
+        texto_rodada = df_rodada.iloc[0]['texto']
+        st.info(texto_rodada, icon="🎙️")
+        
+    # Bloco 2: Narrador da Temporada (Verde/Success ou Cinza/Secondary)
+    if not df_geral.empty:
+        st.markdown("### 🧠 Narrador IA da Temporada")
+        texto_geral = df_geral.iloc[0]['texto']
+        st.success(texto_geral, icon="🧠")
 
 st.markdown("---")
 
