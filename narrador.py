@@ -39,15 +39,19 @@ def get_bq_client():
             
     return bigquery.Client()
 
-def ja_comentou(client, rodada, tipo):
+# --- NOVA FUNÇÃO: LIMPEZA ---
+def limpar_comentarios_anteriores(client, rodada, tipo):
+    """
+    Remove comentários antigos da mesma rodada/tipo para forçar atualização.
+    """
     try:
-        query = f"""
-            SELECT COUNT(*) as qtd FROM `{client.project}.{TAB_CORNETA}` 
-            WHERE rodada = {rodada} AND tipo = '{tipo}'
-        """ # nosec
-        res = list(client.query(query).result())
-        return res[0].qtd > 0
-    except: return False
+        # nosec: Query de delete controlada
+        query = f"DELETE FROM `{client.project}.{TAB_CORNETA}` WHERE rodada = {rodada} AND tipo = '{tipo}'" # nosec
+        client.query(query).result()
+        print(f"🧹 Comentário anterior ({tipo}) removido para atualização.")
+    except Exception as e:
+        # Se a tabela não existir ou der erro, apenas segue
+        print(f"⚠️ Aviso na limpeza (pode ser a primeira execução): {e}")
 
 def chamar_gemini(prompt):
     if not GEMINI_KEY: 
@@ -81,17 +85,15 @@ def gerar_analise_rodada(df_ranking, rodada, status_rodada):
     lider = df_ranking.iloc[0]
     vice = df_ranking.iloc[1] if len(df_ranking) > 1 else lider
     
-    # === CORREÇÃO: FILTRA QUEM ZEROU (Quem não jogou) ===
+    # Filtra quem zerou (não jogou)
     df_jogaram = df_ranking[df_ranking['pontos'] > 0]
     
     if df_jogaram.empty:
-        # Fallback extremo se ninguém pontuou
         lanterna = df_ranking.iloc[-1]
         vice_lanterna = df_ranking.iloc[-2] if len(df_ranking) > 1 else lanterna
     else:
         lanterna = df_jogaram.iloc[-1]
         vice_lanterna = df_jogaram.iloc[-2] if len(df_jogaram) > 1 else lanterna
-    # ====================================================
 
     txt_status = "AO VIVO" if status_rodada == 'PARCIAL' else "FINALIZADA"
     
@@ -114,16 +116,13 @@ def gerar_analise_rodada(df_ranking, rodada, status_rodada):
 
 # 2. Narrador GERAL (Macro)
 def gerar_analise_geral(df_view, rodada_atual):
-    # 1. Líder Geral
     lider_geral = df_view.sort_values('total_geral', ascending=False).iloc[0]
     vice_geral = df_view.sort_values('total_geral', ascending=False).iloc[1]
     
-    # 2. Líder do Turno
     col_turno = 'pontos_turno_2' if rodada_atual >= 19 else 'pontos_turno_1'
     nome_turno = "2º Turno" if rodada_atual >= 19 else "1º Turno"
     lider_turno = df_view.sort_values(col_turno, ascending=False).iloc[0]
     
-    # 3. Líder do Mês
     col_mes, nome_mes = get_coluna_mes(rodada_atual)
     if col_mes in df_view.columns:
         lider_mes = df_view.sort_values(col_mes, ascending=False).iloc[0]
@@ -168,16 +167,20 @@ def gerar_narracao_rodada():
         rodada = int(df_meta['rodada'].iloc[0])
         status = df_meta['tipo_dado'].iloc[0]
 
-        # 1. Rodada
-        if not ja_comentou(client, rodada, 'RODADA'):
-            df_round = client.query(f"SELECT * FROM `{client.project}.{TAB_HISTORICO}` WHERE rodada = {rodada} ORDER BY pontos DESC").to_dataframe() # nosec
-            txt = gerar_analise_rodada(df_round, rodada, status)
-            if txt:
-                print(f"💬 Rodada: {txt}")
-                salvar_comentario(client, txt, rodada, 'RODADA', ts_agora)
+        # 1. Rodada (SEMPRE ATUALIZA)
+        # Removemos o "if not ja_comentou" e colocamos a limpeza explícita
+        limpar_comentarios_anteriores(client, rodada, 'RODADA')
+        
+        df_round = client.query(f"SELECT * FROM `{client.project}.{TAB_HISTORICO}` WHERE rodada = {rodada} ORDER BY pontos DESC").to_dataframe() # nosec
+        txt = gerar_analise_rodada(df_round, rodada, status)
+        if txt:
+            print(f"💬 Rodada: {txt}")
+            salvar_comentario(client, txt, rodada, 'RODADA', ts_agora)
 
-        # 2. Geral (Inclui Turno e Mês agora)
-        if status == 'OFICIAL' and not ja_comentou(client, rodada, 'GERAL'):
+        # 2. Geral (SEMPRE ATUALIZA se for oficial)
+        if status == 'OFICIAL':
+            limpar_comentarios_anteriores(client, rodada, 'GERAL')
+            
             df_view = client.query(f"SELECT * FROM `{client.project}.{VIEW_CONSOLIDADA}`").to_dataframe() # nosec
             txt_geral = gerar_analise_geral(df_view, rodada)
             if txt_geral:
