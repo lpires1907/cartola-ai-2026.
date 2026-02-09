@@ -1,13 +1,13 @@
 import os
 import json
 import requests
+from dotenv import load_dotenv
 
 # --- CONFIG ---
 SLUG_COPA = "1a-copa-sas-brasil-2026"
 
 def get_token():
     try:
-        from dotenv import load_dotenv
         load_dotenv()
     except: pass
     return os.getenv("CARTOLA_GLBID")
@@ -15,7 +15,7 @@ def get_token():
 def debug():
     token = get_token()
     if not token:
-        print("❌ Sem token. Verifique o .env")
+        print("❌ Sem token. Verifique o .env ou Secrets.")
         return
 
     headers = {
@@ -38,17 +38,18 @@ def debug():
             raw = dados['chaves_mata_mata']
             print(f"✅ 'chaves_mata_mata' encontrada. Tipo: {type(raw)}")
             
-            # Se for dicionário, pega o primeiro item para ver a cara dele
+            # Se for dicionário (ex: {"chave_1": {...}})
             if isinstance(raw, dict):
+                # Pega o primeiro item para analisarmos
                 first_key = next(iter(raw))
                 first_item = raw[first_key]
-                print(f"\n🔎 Exemplo de Item (Chave {first_key}):")
+                print(f"\n🔎 AMOSTRA DE DADOS (Chave: {first_key}):")
                 print(json.dumps(first_item, indent=4, ensure_ascii=False))
             
             # Se for lista
             elif isinstance(raw, list):
                 if raw:
-                    print("\n🔎 Exemplo de Item da Lista:")
+                    print("\n🔎 AMOSTRA DE DADOS (Primeiro Item):")
                     print(json.dumps(raw[0], indent=4, ensure_ascii=False))
                 else:
                     print("⚠️ A lista está vazia.")
