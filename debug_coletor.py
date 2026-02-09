@@ -1,14 +1,9 @@
 import os
 import json
 import requests
-from datetime import datetime
 
 # --- CONFIG ---
-SLUG_COPA = "1a-copa-sas-brasil-2026"  # Seu slug
-URLS_TESTE = [
-    f"https://api.cartola.globo.com/auth/liga/{SLUG_COPA}",
-    f"https://api.cartola.globo.com/auth/liga/{SLUG_COPA}/mata-mata"
-]
+SLUG_COPA = "1a-copa-sas-brasil-2026"
 
 def get_token():
     try:
@@ -20,7 +15,7 @@ def get_token():
 def debug():
     token = get_token()
     if not token:
-        print("❌ Sem token CARTOLA_GLBID.")
+        print("❌ Sem token. Verifique o .env")
         return
 
     headers = {
@@ -28,36 +23,40 @@ def debug():
         'Authorization': f'Bearer {token}'
     }
 
-    print(f"🕵️‍♂️ INICIANDO DIAGNÓSTICO DA LIGA: {SLUG_COPA}\n")
+    url = f"https://api.cartola.globo.com/auth/liga/{SLUG_COPA}"
+    print(f"🔬 Analisando estrutura profunda de: {SLUG_COPA}...\n")
 
-    for url in URLS_TESTE:
-        print(f"--- Testando URL: {url} ---")
+    try:
         resp = requests.get(url, headers=headers)
-        
         if resp.status_code != 200:
-            print(f"❌ Erro {resp.status_code}")
-            continue
-            
-        dados = resp.json()
-        print("✅ JSON Recebido com sucesso!")
-        print(f"🔑 Chaves na raiz do JSON: {list(dados.keys())}")
-        
-        # Verifica chaves suspeitas
-        if 'liga' in dados:
-            print(f"📂 Dentro de ['liga']: {list(dados['liga'].keys())}")
-            if 'mata_mata' in dados['liga']:
-                 print("   ⚠️ ACHEI! Existe ['liga']['mata_mata']")
-        
-        if 'mata_mata' in dados:
-            print(f"📂 Dentro de ['mata_mata']: {list(dados['mata_mata'].keys())}")
+            print(f"❌ Erro API: {resp.status_code}")
+            return
 
-        if 'confrontos' in dados:
-            print(f"📂 Dentro de ['confrontos']: Encontrados {len(dados['confrontos'])} itens.")
+        dados = resp.json()
+
+        if 'chaves_mata_mata' in dados:
+            raw = dados['chaves_mata_mata']
+            print(f"✅ 'chaves_mata_mata' encontrada. Tipo: {type(raw)}")
             
-        if 'chaves' in dados:
-             print(f"📂 Dentro de ['chaves']: Encontrados {len(dados['chaves'])} itens.")
-        
-        print("\n" + "="*40 + "\n")
+            # Se for dicionário, pega o primeiro item para ver a cara dele
+            if isinstance(raw, dict):
+                first_key = next(iter(raw))
+                first_item = raw[first_key]
+                print(f"\n🔎 Exemplo de Item (Chave {first_key}):")
+                print(json.dumps(first_item, indent=4, ensure_ascii=False))
+            
+            # Se for lista
+            elif isinstance(raw, list):
+                if raw:
+                    print("\n🔎 Exemplo de Item da Lista:")
+                    print(json.dumps(raw[0], indent=4, ensure_ascii=False))
+                else:
+                    print("⚠️ A lista está vazia.")
+        else:
+            print("❌ 'chaves_mata_mata' NÃO encontrada neste request.")
+
+    except Exception as e:
+        print(f"❌ Erro fatal: {e}")
 
 if __name__ == "__main__":
     debug()
