@@ -9,288 +9,294 @@ import plotly.express as px
 # --- CONFIGURAÇÃO VISUAL ---
 st.set_page_config(page_title="Liga SAS Brasil 2026", page_icon="⚽", layout="wide")
 
-# CSS para esconder índices e melhorar visual
+# CSS Ajustado para Placar da Copa
 st.markdown("""
 <style>
     .metric-card {background-color: #f0f2f6; padding: 15px; border-radius: 10px; text-align: center;}
     [data-testid="stMetricValue"] {font-size: 1.8rem !important;}
+    
+    /* Estilo do Card de Jogo da Copa */
+    .match-card {
+        background-color: white;
+        border: 1px solid #e0e0e0;
+        border-radius: 8px;
+        padding: 15px;
+        margin-bottom: 10px;
+        text-align: center;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+    }
+    .match-score { font-size: 1.4rem; font-weight: bold; color: #333; }
+    .match-team { font-weight: 500; font-size: 1rem; }
+    .match-winner { color: #2e7d32; font-weight: bold; }
+    .match-phase { font-size: 0.8rem; color: #666; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 5px;}
 </style>
 """, unsafe_allow_html=True)
 
-# --- FUNÇÃO AUXILIAR DE SEGURANÇA ---
+# --- FUNÇÕES DE SEGURANÇA E CONEXÃO ---
 def safe_get(value):
-    """
-    Garante que o valor retornado seja um escalar (número ou string única),
-    mesmo que o Pandas retorne uma Series (lista) devido a duplicatas.
-    """
     if isinstance(value, pd.Series):
-        if value.empty:
-            return None
+        if value.empty: return None
         return value.iloc[0]
     return value
 
-# --- CONEXÃO BQ (BLINDADA) ---
 @st.cache_resource
 def get_bq_client():
     if os.path.exists("credentials.json"):
         return bigquery.Client.from_service_account_json("credentials.json")
-    
     try:
         if "GCP_SERVICE_ACCOUNT" not in st.secrets:
             st.error("❌ Secret 'GCP_SERVICE_ACCOUNT' não encontrado.")
             st.stop()
-
         service_account_info = st.secrets["GCP_SERVICE_ACCOUNT"]
-        
         if isinstance(service_account_info, str):
             info = json.loads(service_account_info)
         else:
             info = service_account_info
-
         creds = service_account.Credentials.from_service_account_info(info)
         return bigquery.Client(credentials=creds, project=info['project_id'])
-        
     except Exception as e:
         st.error(f"Erro de Autenticação: {e}")
         st.stop()
 
 client = get_bq_client()
 
-# --- CARGA DE DADOS PRINCIPAL ---
+# --- CARGAS DE DADOS ---
 @st.cache_data(ttl=600)
-def load_data():
+def load_data_geral():
     try:
-        # 1. View Consolidada
-        query_view = "SELECT * FROM `cartola_analytics.view_consolidada_times`"
-        df_view = client.query(query_view).to_dataframe()
-        
-        # Blindagem contra duplicatas e tipos
-        df_view = df_view.loc[:, ~df_view.columns.duplicated()]
-        cols_numericas = ['total_geral', 'pontos_turno_1', 'pontos_turno_2', 'maior_pontuacao', 'menor_pontuacao']
-        for col in cols_numericas:
-            if col not in df_view.columns: df_view[col] = 0.0
-            else: df_view[col] = pd.to_numeric(df_view[col], errors='coerce').fillna(0.0)
+        # View Consolidada
+        query = "SELECT * FROM `cartola_analytics.view_consolidada_times`"
+        df = client.query(query).to_dataframe()
+        df = df.loc[:, ~df.columns.duplicated()] # Remove duplicatas
+        return df
+    except: return pd.DataFrame()
 
-        cols_meses = [c for c in df_view.columns if 'pontos_' in c]
-        for col in cols_meses:
-             df_view[col] = pd.to_numeric(df_view[col], errors='coerce').fillna(0.0)
-
-        # 2. Metadados
-        query_meta = """
+@st.cache_data(ttl=600)
+def load_metadados():
+    try:
+        q = """
             SELECT MAX(rodada) as rodada_atual, 
-                (SELECT Mensal FROM `cartola_analytics.Rodada_Mensal` 
-                    WHERE Rodada = (SELECT MAX(rodada) FROM `cartola_analytics.historico`)) as mes_atual
+            (SELECT Mensal FROM `cartola_analytics.Rodada_Mensal` WHERE Rodada = (SELECT MAX(rodada) FROM `cartola_analytics.historico`)) as mes_atual
             FROM `cartola_analytics.historico`
         """
-        df_meta = client.query(query_meta).to_dataframe()
-        
-        val_rodada = safe_get(df_meta['rodada_atual']) if not df_meta.empty else 1
-        rodada = int(val_rodada) if pd.notnull(val_rodada) else 1
-        
-        val_mes = safe_get(df_meta['mes_atual']) if not df_meta.empty else "Jan Fev"
-        mes_raw = val_mes if pd.notnull(val_mes) else "Jan Fev"
-        
-        map_mes = {
-            'Jan Fev': 'pontos_jan_fev', 'Março': 'pontos_marco', 'Abril': 'pontos_abril',
-            'Maio': 'pontos_maio', 'Jun Jul': 'pontos_jun_jul', 'Agosto': 'pontos_agosto',
-            'Setembro': 'pontos_setembro', 'Outubro': 'pontos_outubro', 'Nov Dez': 'pontos_nov_dez'
-        }
-        col_mes = map_mes.get(mes_raw, 'total_geral')
+        df = client.query(q).to_dataframe()
+        r = int(safe_get(df['rodada_atual'])) if not df.empty and pd.notnull(safe_get(df['rodada_atual'])) else 1
+        m = safe_get(df['mes_atual']) if not df.empty and pd.notnull(safe_get(df['mes_atual'])) else "Jan Fev"
+        return r, m
+    except: return 1, "Jan Fev"
 
-        return df_view, rodada, mes_raw, col_mes
-
-    except Exception as e:
-        st.error(f"Erro ao carregar dados: {e}")
-        return pd.DataFrame(), 0, "Erro", "total_geral"
-
-# --- CARREGA O NARRADOR ---
 @st.cache_data(ttl=600)
 def load_corneta(rodada):
     try:
-        q = f"""
-            SELECT texto, tipo 
-            FROM `cartola_analytics.comentarios_ia` 
-            WHERE rodada = {rodada}
-            ORDER BY data DESC
-        """ # nosec
-        df = client.query(q).to_dataframe()
-        return df
+        q = f"SELECT texto, tipo FROM `cartola_analytics.comentarios_ia` WHERE rodada = {rodada} ORDER BY data DESC" # nosec
+        return client.query(q).to_dataframe()
+    except: return pd.DataFrame()
+
+# --- CARREGA DADOS DA COPA ---
+@st.cache_data(ttl=600)
+def load_copas():
+    try:
+        # Pega sempre a coleta mais recente de cada confronto
+        # Ordenado por data_coleta DESC para que a copa mais recente apareça primeiro na lista
+        q = """
+            SELECT * EXCEPT(rank)
+            FROM (
+                SELECT *, 
+                    ROW_NUMBER() OVER(PARTITION BY nome_copa, fase_copa, time_a_slug, time_b_slug ORDER BY data_coleta DESC) as rank
+                FROM `cartola_analytics.copa_mata_mata`
+            )
+            WHERE rank = 1
+            ORDER BY data_coleta DESC
+        """
+        return client.query(q).to_dataframe()
+    except: return pd.DataFrame()
+
+# --- FUNÇÃO AUXILIAR: IDENTIFICAR COPA ATIVA ---
+def get_copa_default_index(lista_opcoes):
+    """
+    Tenta ler o arquivo copas.json para achar a ativa.
+    Se não achar, retorna 0 (a primeira da lista, que é a mais recente).
+    """
+    try:
+        if os.path.exists("copas.json"):
+            with open("copas.json", "r") as f:
+                configs = json.load(f)
+                
+            # Procura a primeira copa marcada como ativa
+            nome_ativa = next((c['nome_visual'] for c in configs if c.get('ativa')), None)
+            
+            if nome_ativa and nome_ativa in lista_opcoes:
+                return list(lista_opcoes).index(nome_ativa)
     except:
-        return pd.DataFrame()
-
-# Carrega Dados
-with st.spinner('Carregando dados da Liga SAS Brasil...'):
-    df_view, rodada_atual, nome_mes_atual, col_mes_atual = load_data()
-    df_corneta = load_corneta(rodada_atual)
-
-if df_view.empty:
-    st.warning("⚠️ Nenhum dado encontrado no BigQuery. Rode o coletor para popular a tabela.")
-    st.stop()
-
-# --- LÓGICA DE NEGÓCIO ---
-is_segundo_turno = rodada_atual >= 19
-coluna_turno = 'pontos_turno_2' if is_segundo_turno else 'pontos_turno_1'
-nome_turno = "2º Turno" if is_segundo_turno else "1º Turno"
-
-# Ordenações
-top_geral = df_view.sort_values('total_geral', ascending=False)
-top_turno = df_view.sort_values(coluna_turno, ascending=False)
-top_mes = df_view.sort_values(col_mes_atual, ascending=False)
-top_mitada = df_view.sort_values('maior_pontuacao', ascending=False).iloc[0] if not df_view.empty else None
-
-# Zicada corrigida (> 0)
-df_zica_validos = df_view[df_view['menor_pontuacao'] > 0]
-if not df_zica_validos.empty:
-    top_zicada = df_zica_validos.sort_values('menor_pontuacao', ascending=True).iloc[0]
-else:
-    top_zicada = None
-
-# --- CABEÇALHO ---
-st.title(f"🏆 Cartola Analytics - Liga SAS Brasil 2026 - Rodada {rodada_atual}")
-
-# --- BLOCOS DO NARRADOR (SEPARADOS) ---
-if not df_corneta.empty:
+        pass
     
-    # Filtra os tipos
+    return 0 # Default: A primeira da lista
+
+# --- INICIALIZAÇÃO ---
+with st.spinner('Carregando Liga SAS Brasil...'):
+    df_view = load_data_geral()
+    rodada_atual, nome_mes_atual = load_metadados()
+    df_corneta = load_corneta(rodada_atual)
+    df_copas = load_copas()
+
+# --- MAPA DE MESES ---
+map_mes = {
+    'Jan Fev': 'pontos_jan_fev', 'Março': 'pontos_marco', 'Abril': 'pontos_abril',
+    'Maio': 'pontos_maio', 'Jun Jul': 'pontos_jun_jul', 'Agosto': 'pontos_agosto',
+    'Setembro': 'pontos_setembro', 'Outubro': 'pontos_outubro', 'Nov Dez': 'pontos_nov_dez'
+}
+col_mes_atual = map_mes.get(nome_mes_atual, 'total_geral')
+
+# --- HEADER E NARRADOR ---
+st.title(f"🏆 Cartola Analytics - Liga SAS Brasil 2026")
+st.caption(f"Dados atualizados até a Rodada {rodada_atual}")
+
+if not df_corneta.empty:
     df_rodada = df_corneta[df_corneta['tipo'] == 'RODADA']
     df_geral = df_corneta[df_corneta['tipo'] == 'GERAL']
     
-    # Bloco 1: Narrador da Rodada (Azul/Info)
     if not df_rodada.empty:
         st.markdown("### 🎙️ Narrador IA da Rodada")
-        # Pega o texto mais recente (caso tenha duplicatas, pega o primeiro)
-        texto_rodada = df_rodada.iloc[0]['texto']
-        st.info(texto_rodada, icon="🎙️")
-        
-    # Bloco 2: Narrador da Temporada (Verde/Success ou Cinza/Secondary)
+        st.info(df_rodada.iloc[0]['texto'], icon="🎙️")
+    
     if not df_geral.empty:
         st.markdown("### 🧠 Narrador IA da Temporada")
-        texto_geral = df_geral.iloc[0]['texto']
-        st.success(texto_geral, icon="🧠")
+        st.success(df_geral.iloc[0]['texto'], icon="🧠")
 
 st.markdown("---")
 
-# --- DESTAQUES (KPIs) ---
-c1, c2, c3, c4, c5 = st.columns(5)
-tem_dados = len(top_geral) >= 2
+# --- NAVEGAÇÃO PRINCIPAL ---
+aba_liga, aba_copa = st.tabs(["⚽ Liga Pontos Corridos", "🏆 Copas Mata-Mata"])
 
-# 1. GERAL
-with c1:
-    st.markdown("### 🥇 Geral")
-    if tem_dados:
-        lider = top_geral.iloc[0]
-        vice = top_geral.iloc[1]
-        st.metric(label="Líder", value=str(safe_get(lider['nome'])), 
-                  delta=f"Total: {float(safe_get(lider['total_geral'])):.1f}", delta_color="off")
-        st.metric(label="Vice", value=str(safe_get(vice['nome'])), 
-                  delta=f"Total: {float(safe_get(vice['total_geral'])):.1f}", delta_color="off")
-    elif len(top_geral) == 1:
-        st.metric(label="Líder", value=str(safe_get(top_geral.iloc[0]['nome'])), 
-                  delta=f"{float(safe_get(top_geral.iloc[0]['total_geral'])):.1f} pts", delta_color="off")
+# ==============================================================================
+# ABA 1: LIGA PONTOS CORRIDOS
+# ==============================================================================
+with aba_liga:
+    if df_view.empty:
+        st.warning("Sem dados da Liga.")
+    else:
+        # Tratamento de Nulos
+        cols_num = ['total_geral', 'pontos_turno_1', 'pontos_turno_2', 'maior_pontuacao', 'menor_pontuacao']
+        for c in cols_num: 
+            if c in df_view.columns: df_view[c] = pd.to_numeric(df_view[c], errors='coerce').fillna(0.0)
+        if col_mes_atual in df_view.columns: df_view[col_mes_atual] = pd.to_numeric(df_view[col_mes_atual], errors='coerce').fillna(0.0)
 
-# 2. TURNO
-with c2:
-    st.markdown(f"### 🥈 {nome_turno}")
-    if tem_dados:
-        lider_t = top_turno.iloc[0]
-        vice_t = top_turno.iloc[1]
-        st.metric(label="Líder", value=str(safe_get(lider_t['nome'])), 
-                  delta=f"Total: {float(safe_get(lider_t[coluna_turno])):.1f}", delta_color="off")
-        st.metric(label="Vice", value=str(safe_get(vice_t['nome'])), 
-                  delta=f"Total: {float(safe_get(vice_t[coluna_turno])):.1f}", delta_color="off")
+        # Ordenações
+        is_2turno = rodada_atual >= 19
+        col_turno = 'pontos_turno_2' if is_2turno else 'pontos_turno_1'
+        nome_turno = "2º Turno" if is_2turno else "1º Turno"
 
-# 3. MÊS
-with c3:
-    st.markdown(f"### 📅 {nome_mes_atual}")
-    if tem_dados:
-        lider_m = top_mes.iloc[0]
-        vice_m = top_mes.iloc[1]
-        st.metric(label="Líder", value=str(safe_get(lider_m['nome'])), 
-                  delta=f"Total: {float(safe_get(lider_m[col_mes_atual])):.1f}", delta_color="off")
-        st.metric(label="Vice", value=str(safe_get(vice_m['nome'])), 
-                  delta=f"Total: {float(safe_get(vice_m[col_mes_atual])):.1f}", delta_color="off")
+        top_geral = df_view.sort_values('total_geral', ascending=False)
+        top_turno = df_view.sort_values(col_turno, ascending=False)
+        top_mes = df_view.sort_values(col_mes_atual, ascending=False)
+        top_mitada = df_view.sort_values('maior_pontuacao', ascending=False).iloc[0]
+        
+        df_zica = df_view[df_view['menor_pontuacao'] > 0]
+        top_zica = df_zica.sort_values('menor_pontuacao', ascending=True).iloc[0] if not df_zica.empty else None
 
-# 4. MITADA
-with c4:
-    st.markdown("### 🚀 Mitada")
-    if top_mitada is not None:
-        val_mitada = float(safe_get(top_mitada['maior_pontuacao']))
-        st.metric(label="Maior Pontuação", value=str(safe_get(top_mitada['nome'])), 
-                  delta=f"{val_mitada:.1f} pts")
+        # KPIs
+        c1, c2, c3, c4, c5 = st.columns(5)
+        
+        with c1:
+            st.markdown("##### 🥇 Geral")
+            if len(top_geral) >= 2:
+                st.metric("Líder", str(safe_get(top_geral.iloc[0]['nome'])), f"{float(safe_get(top_geral.iloc[0]['total_geral'])):.1f}", delta_color="off")
+                st.metric("Vice", str(safe_get(top_geral.iloc[1]['nome'])), f"{float(safe_get(top_geral.iloc[1]['total_geral'])):.1f}", delta_color="off")
+        
+        with c2:
+            st.markdown(f"##### 🥈 {nome_turno}")
+            if len(top_turno) >= 2:
+                st.metric("Líder", str(safe_get(top_turno.iloc[0]['nome'])), f"{float(safe_get(top_turno.iloc[0][col_turno])):.1f}", delta_color="off")
+                st.metric("Vice", str(safe_get(top_turno.iloc[1]['nome'])), f"{float(safe_get(top_turno.iloc[1][col_turno])):.1f}", delta_color="off")
 
-# 5. ZICADA
-with c5:
-    st.markdown("### 🐢 Zicada")
-    if top_zicada is not None:
-        val_zica = float(safe_get(top_zicada['menor_pontuacao']))
-        st.metric(label="Menor Pontuação (>0)", value=str(safe_get(top_zicada['nome'])), 
-                  delta=f"{val_zica:.1f} pts", delta_color="inverse")
+        with c3:
+            st.markdown(f"##### 📅 {nome_mes_atual}")
+            if len(top_mes) >= 2:
+                st.metric("Líder", str(safe_get(top_mes.iloc[0]['nome'])), f"{float(safe_get(top_mes.iloc[0][col_mes_atual])):.1f}", delta_color="off")
+                st.metric("Vice", str(safe_get(top_mes.iloc[1]['nome'])), f"{float(safe_get(top_mes.iloc[1][col_mes_atual])):.1f}", delta_color="off")
 
-st.markdown("---")
+        with c4:
+            st.markdown("##### 🚀 Mitada")
+            st.metric("Maior Pontuação", str(safe_get(top_mitada['nome'])), f"{float(safe_get(top_mitada['maior_pontuacao'])):.1f} pts")
 
-# --- GRÁFICOS ---
-st.subheader("📊 Classificação Top 5")
-tab1, tab2, tab3 = st.tabs(["🌎 Geral", f"🔄 {nome_turno}", f"📅 Mensal ({nome_mes_atual})"])
+        with c5:
+            st.markdown("##### 🐢 Zicada")
+            if top_zica is not None:
+                st.metric("Menor (>0)", str(safe_get(top_zica['nome'])), f"{float(safe_get(top_zica['menor_pontuacao'])):.1f} pts", delta_color="inverse")
 
-def plot_top5(df, y_col, color_col, title):
-    if df.empty: return None
-    df_top = df.sort_values(y_col, ascending=False).head(5)
-    df_top = df_top.copy()
-    df_top[y_col] = df_top[y_col].apply(lambda x: float(safe_get(x)))
-    df_top['nome'] = df_top['nome'].apply(lambda x: str(safe_get(x)))
+        st.divider()
 
-    fig = px.bar(
-        df_top, x=y_col, y='nome', text=y_col, orientation='h',
-        color=color_col, color_continuous_scale='Greens', title=title
-    )
-    fig.update_layout(yaxis={'categoryorder':'total ascending'}, showlegend=False)
-    fig.update_traces(texttemplate='%{text:.1f}', textposition='outside')
-    return fig
+        # Gráficos
+        st.subheader("📊 Classificação Top 5")
+        t1, t2, t3 = st.tabs(["🌎 Geral", f"🔄 {nome_turno}", f"📅 Mês"])
+        
+        def plot_bar(df, col, title):
+            tmp = df.sort_values(col, ascending=False).head(5).copy()
+            tmp[col] = tmp[col].astype(float)
+            fig = px.bar(tmp, x=col, y='nome', text=col, orientation='h', color=col, color_continuous_scale='Greens')
+            fig.update_layout(yaxis={'categoryorder':'total ascending'}, showlegend=False, height=300)
+            fig.update_traces(texttemplate='%{text:.1f}', textposition='outside')
+            return fig
 
-with tab1: st.plotly_chart(plot_top5(df_view, 'total_geral', 'total_geral', "Top 5 Geral"), use_container_width=True)
-with tab2: st.plotly_chart(plot_top5(df_view, coluna_turno, coluna_turno, f"Top 5 - {nome_turno}"), use_container_width=True)
-with tab3: st.plotly_chart(plot_top5(df_view, col_mes_atual, col_mes_atual, f"Top 5 - {nome_mes_atual}"), use_container_width=True)
+        with t1: st.plotly_chart(plot_bar(df_view, 'total_geral', "Geral"), use_container_width=True)
+        with t2: st.plotly_chart(plot_bar(df_view, col_turno, nome_turno), use_container_width=True)
+        with t3: st.plotly_chart(plot_bar(df_view, col_mes_atual, nome_mes_atual), use_container_width=True)
 
-# --- TABELA COMPLETA ---
-st.markdown("---")
-with st.expander("📋 Ver Tabela Completa (Todos os Meses)", expanded=False):
-    df_display = df_view.copy()
-    df_display = df_display.loc[:, ~df_display.columns.duplicated()]
-    
-    try:
-        import matplotlib
-        st.dataframe(
-            df_display.style.format("{:.1f}", subset=df_display.select_dtypes(include='number').columns)
-                   .background_gradient(subset=['total_geral'], cmap='Greens'),
-            use_container_width=True
-        )
-    except ImportError:
-        st.dataframe(df_display, use_container_width=True)
+        # Tabela
+        with st.expander("📋 Tabela Completa"):
+            st.dataframe(df_view.style.background_gradient(subset=['total_geral'], cmap='Greens'), use_container_width=True)
 
-# --- RAIO-X ---
-st.markdown("---")
-st.subheader("🔬 Raio-X Detalhado (Escalações)")
-filtro_rodada = st.selectbox("Escolha a Rodada:", sorted(range(1, rodada_atual + 1), reverse=True))
-
-@st.cache_data
-def get_escalacoes(rodada):
-    q = f"""
-        SELECT liga_time_nome as Time, atleta_apelido as Jogador, atleta_posicao as Posicao, 
-               pontos as Pontos, is_capitao as Capitao
-        FROM `cartola_analytics.times_escalacoes`
-        WHERE rodada = {rodada}
-        ORDER BY Time, Pontos DESC
-    """ # nosec
-    return client.query(q).to_dataframe()
-
-df_detalhe = get_escalacoes(filtro_rodada)
-
-if not df_detalhe.empty:
-    st.dataframe(
-        df_detalhe.style.format({"Pontos": "{:.1f}"})
-              .applymap(lambda x: "background-color: #d1e7dd; font-weight: bold" if x else "", subset=['Capitao']),
-        use_container_width=True,
-        hide_index=True
-    )
-else:
-    st.warning("Nenhum dado encontrado para esta rodada.")
+# ==============================================================================
+# ABA 2: COPAS MATA-MATA
+# ==============================================================================
+with aba_copa:
+    if df_copas.empty:
+        st.info("🏆 Nenhuma Copa cadastrada ou iniciada ainda.")
+    else:
+        # Lógica para definir o Index Default
+        lista_copas = df_copas['nome_copa'].unique()
+        idx_default = get_copa_default_index(lista_copas)
+        
+        copa_selecionada = st.selectbox("Selecione a Copa:", lista_copas, index=idx_default)
+        
+        # Filtra dados da copa
+        df_atual = df_copas[df_copas['nome_copa'] == copa_selecionada].copy()
+        
+        if df_atual.empty:
+            st.warning("Dados indisponíveis para esta copa.")
+        else:
+            # Agrupar por fase
+            fases = df_atual['fase_copa'].unique()
+            
+            for fase in fases:
+                st.markdown(f"### ⚔️ {fase}")
+                duelos = df_atual[df_atual['fase_copa'] == fase]
+                
+                # Grid de Cards
+                cols = st.columns(3) # 3 jogos por linha
+                for idx, (_, row) in enumerate(duelos.iterrows()):
+                    with cols[idx % 3]:
+                        # Define cores do vencedor
+                        cor_a = "match-winner" if row['vencedor'] == row['time_a_slug'] else ""
+                        cor_b = "match-winner" if row['vencedor'] == row['time_b_slug'] else ""
+                        
+                        st.markdown(f"""
+                        <div class="match-card">
+                            <div class="match-phase">{row['fase_copa']}</div>
+                            <div style="display: flex; justify-content: space-between; align_items: center;">
+                                <div style="flex: 1; text-align: left;">
+                                    <div class="{cor_a} match-team">{row['time_a_nome']}</div>
+                                </div>
+                                <div class="match-score">{row['time_a_pontos']:.1f}</div>
+                            </div>
+                            <div style="margin: 5px 0; border-bottom: 1px solid #eee;"></div>
+                            <div style="display: flex; justify-content: space-between; align_items: center;">
+                                <div style="flex: 1; text-align: left;">
+                                    <div class="{cor_b} match-team">{row['time_b_nome']}</div>
+                                </div>
+                                <div class="match-score">{row['time_b_pontos']:.1f}</div>
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+            
+            st.caption(f"Última atualização: {df_atual['data_coleta'].max()}")
