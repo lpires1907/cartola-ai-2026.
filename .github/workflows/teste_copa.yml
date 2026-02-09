@@ -23,4 +23,4 @@ jobs:
         env:
           # Pega o segredo que já está configurado no seu GitHub
           CARTOLA_GLBID: ${{ secrets.CARTOLA_GLBID }} 
-        run: python debug_copa.py
+        run: python debug_coletor.py
