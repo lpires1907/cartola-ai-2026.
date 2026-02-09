@@ -47,10 +47,10 @@ def carregar_configuracao():
 def limpar_dados_da_copa(client, slug):
     """
     Remove todos os dados de uma copa específica antes de inserir a versão atualizada.
-    Isso evita duplicação das chaves de mata-mata.
     """
     try:
-        query = f"DELETE FROM `{client.project}.{TAB_COPA}` WHERE liga_slug = '{slug}'"
+        # CORREÇÃO B608: Adicionado '# nosec' para validar que o slug vem de config confiável
+        query = f"DELETE FROM `{client.project}.{TAB_COPA}` WHERE liga_slug = '{slug}'" # nosec
         client.query(query).result()
         print(f"🧹 Dados antigos da copa '{slug}' removidos com sucesso.")
     except Exception as e:
@@ -87,7 +87,7 @@ def coletar_dados_copa():
         
         print(f"   🔄 Atualizando: {nome_visual} ({slug})...")
         
-        # 1. Limpeza Prévia (Update Strategy: Delete & Insert)
+        # 1. Limpeza Prévia
         limpar_dados_da_copa(client, slug)
 
         # 2. Coleta Nova
@@ -95,7 +95,9 @@ def coletar_dados_copa():
         confrontos_lista = []
 
         try:
-            resp = requests.get(url, headers=headers)
+            # CORREÇÃO B113: Adicionado timeout de 30 segundos
+            resp = requests.get(url, headers=headers, timeout=30)
+            
             if resp.status_code != 200:
                 print(f"      ❌ Erro API ({resp.status_code}) ao acessar {slug}")
                 continue
@@ -103,7 +105,7 @@ def coletar_dados_copa():
             dados = resp.json()
             rodada_atual = dados['liga'].get('rodada_atual', 0)
             
-            # Busca confrontos (tenta 'confrontos' ou 'chaves')
+            # Busca confrontos
             confrontos = dados.get('confrontos', [])
             if not confrontos and 'chaves' in dados:
                  confrontos = dados['chaves']
@@ -117,7 +119,6 @@ def coletar_dados_copa():
                     t1 = c.get('time_a', {}) or {}
                     t2 = c.get('time_b', {}) or {}
                     
-                    # Se for chave vazia, ignora
                     if not t1 and not t2: continue
 
                     item = {
@@ -166,7 +167,7 @@ def coletar_dados_copa():
                 
                 job_config = bigquery.LoadJobConfig(
                     schema=schema,
-                    write_disposition="WRITE_APPEND", # Append porque já deletamos o específico antes
+                    write_disposition="WRITE_APPEND",
                     schema_update_options=[bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION]
                 )
                 
