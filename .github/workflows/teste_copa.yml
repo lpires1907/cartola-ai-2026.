@@ -1,0 +1,26 @@
+name: 🕵️ Diagnóstico Copa (Manual)
+
+on:
+  workflow_dispatch: # Isso cria um botão para rodar manualmente
+
+jobs:
+  debug_job:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Baixar Código
+        uses: actions/checkout@v3
+
+      - name: 🐍 Configurar Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: 📦 Instalar Requests
+        run: pip install requests
+
+      - name: 🚀 Rodar Diagnóstico
+        env:
+          # Pega o segredo que já está configurado no seu GitHub
+          CARTOLA_GLBID: ${{ secrets.CARTOLA_GLBID }} 
+        run: python debug_copa.py
