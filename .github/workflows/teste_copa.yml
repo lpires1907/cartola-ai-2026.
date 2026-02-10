@@ -1,7 +1,7 @@
 name: 🕵️ Diagnóstico Copa (Manual)
 
 on:
-  workflow_dispatch: # Isso cria um botão para rodar manualmente
+  workflow_dispatch:
 
 jobs:
   debug_job:
@@ -16,11 +16,13 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: 📦 Instalar Requests
-        run: pip install requests
+      - name: 📦 Instalar Dependências
+        # AQUI ESTAVA O ERRO: Agora instalamos tudo do requirements.txt
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
       - name: 🚀 Rodar Diagnóstico
         env:
-          # Pega o segredo que já está configurado no seu GitHub
           CARTOLA_GLBID: ${{ secrets.CARTOLA_GLBID }} 
         run: python debug_coletor.py
