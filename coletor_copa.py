@@ -12,10 +12,19 @@ ARQUIVO_CONFIG = "copas.json"
 DATASET_ID = "cartola_analytics"
 TAB_COPA = f"{DATASET_ID}.copa_mata_mata"
 
+# Mapa de Fases (O Cartola usa letras)
+MAPA_FASES = {
+    "1": "32-avos de Final",
+    "2": "16-avos de Final",
+    "O": "Oitavas de Final",
+    "Q": "Quartas de Final",
+    "S": "Semifinal",
+    "F": "Final"
+}
+
 def get_bq_client():
     if os.path.exists("credentials.json"):
         return bigquery.Client.from_service_account_json("credentials.json")
-    
     if os.getenv('GCP_SERVICE_ACCOUNT'):
         try:
             info = json.loads(os.getenv('GCP_SERVICE_ACCOUNT'))
@@ -44,86 +53,11 @@ def carregar_configuracao():
 
 def limpar_dados_da_copa(client, slug):
     try:
-        # nosec: slug vem de config interna
         query = f"DELETE FROM `{client.project}.{TAB_COPA}` WHERE liga_slug = '{slug}'" # nosec
         client.query(query).result()
         print(f"🧹 Dados antigos removidos para '{slug}'.")
     except Exception as e:
         print(f"ℹ️ Limpeza pulada (Tabela inexistente ou erro): {e}")
-
-# --- NOVA FUNÇÃO DE EXTRAÇÃO INTELIGENTE ---
-def extrair_confrontos_recursivo(dados, nome_fase_pai=None):
-    """
-    Navega profundamente no JSON procurando por objetos que tenham 'time_a' e 'time_b'.
-    Preserva o nome da fase se encontrar no caminho.
-    """
-    confrontos_achados = []
-
-    # Se for dicionário
-    if isinstance(dados, dict):
-        # Tenta pegar o nome da fase atual ou usa o do pai
-        fase_atual = dados.get('nome', nome_fase_pai)
-        
-        # VERIFICAÇÃO DE SUCESSO: É um confronto?
-        # Um confronto tem que ter 'time_a' E 'time_b' (mesmo que sejam None/Null)
-        if 'time_a' in dados and 'time_b' in dados:
-            # Injeta o nome da fase encontrada no objeto para uso posterior
-            dados['nome_fase_extraida'] = fase_atual
-            return [dados]
-
-        # Se não é confronto, continua mergulhando nos valores
-        for key, value in dados.items():
-            confrontos_achados.extend(extrair_confrontos_recursivo(value, fase_atual))
-
-    # Se for lista
-    elif isinstance(dados, list):
-        for item in dados:
-            confrontos_achados.extend(extrair_confrontos_recursivo(item, nome_fase_pai))
-
-    return confrontos_achados
-
-def buscar_confrontos_na_api(slug, headers):
-    url_padrao = f"https://api.cartola.globo.com/auth/liga/{slug}"
-    print(f"      🔎 Consultando API: {url_padrao}")
-    
-    try:
-        resp = requests.get(url_padrao, headers=headers, timeout=30)
-        if resp.status_code == 200:
-            dados = resp.json()
-            rodada = dados['liga'].get('rodada_atual', 0)
-            
-            # Debug Rápido: Quais chaves principais vieram?
-            print(f"      🔑 Chaves Raiz: {list(dados.keys())}")
-
-            alvo_busca = None
-            
-            # Prioridade 1: 'chaves_mata_mata'
-            if 'chaves_mata_mata' in dados:
-                print("      🎯 Usando chave: 'chaves_mata_mata'")
-                alvo_busca = dados['chaves_mata_mata']
-            
-            # Prioridade 2: 'confrontos'
-            elif 'confrontos' in dados:
-                print("      🎯 Usando chave: 'confrontos'")
-                alvo_busca = dados['confrontos']
-            
-            # Prioridade 3: 'mata_mata' -> 'chaves' (Estrutura antiga)
-            elif 'liga' in dados and 'mata_mata' in dados['liga']:
-                 print("      🎯 Usando chave: 'liga.mata_mata'")
-                 alvo_busca = dados['liga']['mata_mata']
-
-            if alvo_busca:
-                # Usa a função recursiva para achar os jogos onde quer que estejam
-                matches = extrair_confrontos_recursivo(alvo_busca)
-                if matches:
-                    return matches, rodada
-                else:
-                    print("      ⚠️ A chave existe, mas o extrator recursivo não achou objetos com 'time_a' e 'time_b'.")
-            
-    except Exception as e:
-        print(f"      ⚠️ Erro API: {e}")
-
-    return [], 0
 
 def coletar_dados_copa():
     copas = carregar_configuracao()
@@ -154,80 +88,115 @@ def coletar_dados_copa():
         print(f"   🔄 Processando: {nome_visual} ({slug})...")
         limpar_dados_da_copa(client, slug)
 
-        confrontos, rodada_api = buscar_confrontos_na_api(slug, headers)
+        url = f"https://api.cartola.globo.com/auth/liga/{slug}"
+        
+        try:
+            resp = requests.get(url, headers=headers, timeout=30)
+            if resp.status_code != 200:
+                print(f"      ❌ Erro API: {resp.status_code}")
+                continue
 
-        if not confrontos:
-            print("      ❌ FALHA: Nenhum confronto encontrado.")
-            continue
+            dados = resp.json()
+            rodada_atual = dados['liga'].get('rodada_atual', 0)
+            
+            # 1. PEGA O DICIONÁRIO DE TIMES (Para traduzir ID -> Nome)
+            dic_times = dados.get('times', {})
+            
+            # 2. PEGA OS CONFRONTOS (Estrutura: "1": [jogos], "2": [jogos]...)
+            raw_chaves = dados.get('chaves_mata_mata', {})
+            
+            lista_final = []
 
-        print(f"      ✅ Sucesso! {len(confrontos)} duelos encontrados.")
+            # Itera sobre as rodadas/fases ("1", "2"...)
+            for key_rodada, lista_jogos in raw_chaves.items():
+                if not isinstance(lista_jogos, list): continue
 
-        lista_final = []
-        for c in confrontos:
-            try:
-                t1 = c.get('time_a') or {}
-                t2 = c.get('time_b') or {}
-                
-                # Permite salvar mesmo que um dos times seja None (chave incompleta esperando definição)
-                # Mas pelo menos um dos lados ou o objeto precisa existir
-                
-                # Tenta pegar nome da fase (prioridade: extraído > direto > padrão)
-                fase = c.get('nome_fase_extraida') or c.get('nome_fase') or c.get('nome') or 'Fase Única'
+                for jogo in lista_jogos:
+                    try:
+                        # Extrai IDs
+                        id_mandante = str(jogo.get('time_mandante_id'))
+                        id_visitante = str(jogo.get('time_visitante_id'))
+                        id_vencedor = str(jogo.get('vencedor_id'))
+                        
+                        # Traduz Fase (ex: "Q" -> Quartas)
+                        tipo_fase = jogo.get('tipo_fase', 'Rodada')
+                        nome_fase = MAPA_FASES.get(tipo_fase, f"Fase {tipo_fase}")
 
-                item = {
-                    'nome_copa': nome_visual,
-                    'liga_slug': slug,
-                    'rodada_real': rodada_api,
-                    'fase_copa': fase,
-                    
-                    'time_a_nome': t1.get('nome', 'A Definir'),
-                    'time_a_slug': t1.get('slug', ''),
-                    'time_a_escudo': t1.get('url_escudo_png', ''),
-                    'time_a_pontos': float(c.get('pontuacao_a', 0) or 0),
-                    
-                    'time_b_nome': t2.get('nome', 'A Definir'),
-                    'time_b_slug': t2.get('slug', ''),
-                    'time_b_escudo': t2.get('url_escudo_png', ''),
-                    'time_b_pontos': float(c.get('pontuacao_b', 0) or 0),
-                    
-                    'vencedor': c.get('vencedor', {}).get('slug') if c.get('vencedor') else None,
-                    'data_coleta': ts_agora
-                }
-                lista_final.append(item)
-            except Exception as e:
-                print(f"      ⚠️ Erro no item: {e}")
+                        # Busca Detalhes do Time Mandante
+                        time_a = dic_times.get(id_mandante, {})
+                        nome_a = time_a.get('nome', f'Time {id_mandante}')
+                        escudo_a = time_a.get('url_escudo_png', '')
+                        slug_a = time_a.get('slug', id_mandante)
+                        pontos_a = float(jogo.get('time_mandante_pontuacao') or 0.0)
 
-        if lista_final:
-            df = pd.DataFrame(lista_final)
-            # Schema garantindo consistência
-            schema = [
-                bigquery.SchemaField("nome_copa", "STRING"),
-                bigquery.SchemaField("liga_slug", "STRING"),
-                bigquery.SchemaField("rodada_real", "INTEGER"),
-                bigquery.SchemaField("fase_copa", "STRING"),
-                bigquery.SchemaField("time_a_nome", "STRING"),
-                bigquery.SchemaField("time_a_slug", "STRING"),
-                bigquery.SchemaField("time_a_escudo", "STRING"),
-                bigquery.SchemaField("time_a_pontos", "FLOAT"),
-                bigquery.SchemaField("time_b_nome", "STRING"),
-                bigquery.SchemaField("time_b_slug", "STRING"),
-                bigquery.SchemaField("time_b_escudo", "STRING"),
-                bigquery.SchemaField("time_b_pontos", "FLOAT"),
-                bigquery.SchemaField("vencedor", "STRING"),
-                bigquery.SchemaField("data_coleta", "TIMESTAMP"),
-            ]
-            job_config = bigquery.LoadJobConfig(
-                schema=schema,
-                write_disposition="WRITE_APPEND",
-                schema_update_options=[bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION]
-            )
-            try:
-                client.load_table_from_dataframe(df, TAB_COPA, job_config=job_config).result()
-                print(f"      💾 Salvo no BigQuery: {len(df)} registros.")
-            except Exception as e:
-                print(f"      ❌ Erro BQ: {e}")
-        else:
-            print("      ⚠️ Lista final vazia.")
+                        # Busca Detalhes do Time Visitante
+                        time_b = dic_times.get(id_visitante, {})
+                        nome_b = time_b.get('nome', f'Time {id_visitante}')
+                        escudo_b = time_b.get('url_escudo_png', '')
+                        slug_b = time_b.get('slug', id_visitante)
+                        pontos_b = float(jogo.get('time_visitante_pontuacao') or 0.0)
+                        
+                        # Vencedor
+                        slug_vencedor = None
+                        if id_vencedor == id_mandante: slug_vencedor = slug_a
+                        elif id_vencedor == id_visitante: slug_vencedor = slug_b
+
+                        item = {
+                            'nome_copa': nome_visual,
+                            'liga_slug': slug,
+                            'rodada_real': rodada_atual,
+                            'fase_copa': nome_fase,
+                            
+                            'time_a_nome': nome_a,
+                            'time_a_slug': slug_a,
+                            'time_a_escudo': escudo_a,
+                            'time_a_pontos': pontos_a,
+                            
+                            'time_b_nome': nome_b,
+                            'time_b_slug': slug_b,
+                            'time_b_escudo': escudo_b,
+                            'time_b_pontos': pontos_b,
+                            
+                            'vencedor': slug_vencedor,
+                            'data_coleta': ts_agora
+                        }
+                        lista_final.append(item)
+                    except Exception as e:
+                        print(f"      ⚠️ Erro no jogo: {e}")
+
+            if lista_final:
+                df = pd.DataFrame(lista_final)
+                schema = [
+                    bigquery.SchemaField("nome_copa", "STRING"),
+                    bigquery.SchemaField("liga_slug", "STRING"),
+                    bigquery.SchemaField("rodada_real", "INTEGER"),
+                    bigquery.SchemaField("fase_copa", "STRING"),
+                    bigquery.SchemaField("time_a_nome", "STRING"),
+                    bigquery.SchemaField("time_a_slug", "STRING"),
+                    bigquery.SchemaField("time_a_escudo", "STRING"),
+                    bigquery.SchemaField("time_a_pontos", "FLOAT"),
+                    bigquery.SchemaField("time_b_nome", "STRING"),
+                    bigquery.SchemaField("time_b_slug", "STRING"),
+                    bigquery.SchemaField("time_b_escudo", "STRING"),
+                    bigquery.SchemaField("time_b_pontos", "FLOAT"),
+                    bigquery.SchemaField("vencedor", "STRING"),
+                    bigquery.SchemaField("data_coleta", "TIMESTAMP"),
+                ]
+                job_config = bigquery.LoadJobConfig(
+                    schema=schema,
+                    write_disposition="WRITE_APPEND",
+                    schema_update_options=[bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION]
+                )
+                try:
+                    client.load_table_from_dataframe(df, TAB_COPA, job_config=job_config).result()
+                    print(f"      ✅ SUCESSO! {len(df)} jogos salvos no BigQuery.")
+                except Exception as e:
+                    print(f"      ❌ Erro BQ: {e}")
+            else:
+                print("      ⚠️ Nenhum jogo processado.")
+
+        except Exception as e:
+            print(f"      ❌ Erro fatal: {e}")
 
 if __name__ == "__main__":
     coletar_dados_copa()
