@@ -15,7 +15,6 @@ TAB_COPA = f"{DATASET_ID}.copa_mata_mata"
 def get_bq_client():
     if os.path.exists("credentials.json"):
         return bigquery.Client.from_service_account_json("credentials.json")
-    
     if os.getenv('GCP_SERVICE_ACCOUNT'):
         try:
             info = json.loads(os.getenv('GCP_SERVICE_ACCOUNT'))
@@ -51,31 +50,31 @@ def limpar_dados_da_copa(client, slug):
     except Exception as e:
         print(f"ℹ️ Limpeza pulada (Tabela inexistente ou erro): {e}")
 
-# --- NOVA FUNÇÃO DE EXTRAÇÃO INTELIGENTE ---
+# --- ESTRATÉGIA RECURSIVA ---
 def extrair_confrontos_recursivo(dados, nome_fase_pai=None):
-    """
-    Navega profundamente no JSON procurando por objetos que tenham 'time_a' e 'time_b'.
-    Preserva o nome da fase se encontrar no caminho.
-    """
     confrontos_achados = []
 
-    # Se for dicionário
     if isinstance(dados, dict):
-        # Tenta pegar o nome da fase atual ou usa o do pai
         fase_atual = dados.get('nome', nome_fase_pai)
         
-        # VERIFICAÇÃO DE SUCESSO: É um confronto?
-        # Um confronto tem que ter 'time_a' E 'time_b' (mesmo que sejam None/Null)
+        # TENTA IDENTIFICAR SE É UM CONFRONTO (Várias opções de chaves)
+        # Opção 1: Padrão (time_a / time_b)
         if 'time_a' in dados and 'time_b' in dados:
-            # Injeta o nome da fase encontrada no objeto para uso posterior
             dados['nome_fase_extraida'] = fase_atual
             return [dados]
+        
+        # Opção 2: Mata-mata antigo (clube_casa_id / clube_visitante_id)
+        if 'clube_casa_id' in dados and 'clube_visitante_id' in dados:
+             # Normaliza para o formato padrão
+             dados['time_a'] = {'id': dados['clube_casa_id'], 'slug': str(dados['clube_casa_id'])}
+             dados['time_b'] = {'id': dados['clube_visitante_id'], 'slug': str(dados['clube_visitante_id'])}
+             dados['nome_fase_extraida'] = fase_atual
+             return [dados]
 
-        # Se não é confronto, continua mergulhando nos valores
+        # Continua buscando
         for key, value in dados.items():
             confrontos_achados.extend(extrair_confrontos_recursivo(value, fase_atual))
 
-    # Se for lista
     elif isinstance(dados, list):
         for item in dados:
             confrontos_achados.extend(extrair_confrontos_recursivo(item, nome_fase_pai))
@@ -92,33 +91,31 @@ def buscar_confrontos_na_api(slug, headers):
             dados = resp.json()
             rodada = dados['liga'].get('rodada_atual', 0)
             
-            # Debug Rápido: Quais chaves principais vieram?
-            print(f"      🔑 Chaves Raiz: {list(dados.keys())}")
-
             alvo_busca = None
-            
-            # Prioridade 1: 'chaves_mata_mata'
+            origem = ""
+
             if 'chaves_mata_mata' in dados:
-                print("      🎯 Usando chave: 'chaves_mata_mata'")
+                origem = "chaves_mata_mata"
                 alvo_busca = dados['chaves_mata_mata']
-            
-            # Prioridade 2: 'confrontos'
             elif 'confrontos' in dados:
-                print("      🎯 Usando chave: 'confrontos'")
+                origem = "confrontos"
                 alvo_busca = dados['confrontos']
-            
-            # Prioridade 3: 'mata_mata' -> 'chaves' (Estrutura antiga)
             elif 'liga' in dados and 'mata_mata' in dados['liga']:
-                 print("      🎯 Usando chave: 'liga.mata_mata'")
+                 origem = "liga.mata_mata"
                  alvo_busca = dados['liga']['mata_mata']
 
             if alvo_busca:
-                # Usa a função recursiva para achar os jogos onde quer que estejam
                 matches = extrair_confrontos_recursivo(alvo_busca)
                 if matches:
                     return matches, rodada
                 else:
-                    print("      ⚠️ A chave existe, mas o extrator recursivo não achou objetos com 'time_a' e 'time_b'.")
+                    print(f"      ⚠️ Chave '{origem}' encontrada, mas nenhum match compatível.")
+                    print("      🕵️‍♂️ IMPRIMINDO CONTEÚDO PARA DEBUG (Copie isso):")
+                    # Imprime apenas uma amostra para não poluir demais
+                    try:
+                        print(json.dumps(alvo_busca, indent=2, ensure_ascii=False)[:2000] + "...")
+                    except:
+                        print(alvo_busca)
             
     except Exception as e:
         print(f"      ⚠️ Erro API: {e}")
@@ -165,13 +162,17 @@ def coletar_dados_copa():
         lista_final = []
         for c in confrontos:
             try:
+                # Tenta normalizar os dados
                 t1 = c.get('time_a') or {}
                 t2 = c.get('time_b') or {}
                 
-                # Permite salvar mesmo que um dos times seja None (chave incompleta esperando definição)
-                # Mas pelo menos um dos lados ou o objeto precisa existir
-                
-                # Tenta pegar nome da fase (prioridade: extraído > direto > padrão)
+                # Se t1/t2 forem apenas IDs (inteiros), tenta converter para objeto mínimo
+                if isinstance(t1, int): t1 = {'nome': f'Time {t1}', 'slug': str(t1)}
+                if isinstance(t2, int): t2 = {'nome': f'Time {t2}', 'slug': str(t2)}
+
+                # Garante que temos pelo menos um placeholder
+                if not t1 and not t2: continue
+
                 fase = c.get('nome_fase_extraida') or c.get('nome_fase') or c.get('nome') or 'Fase Única'
 
                 item = {
@@ -195,11 +196,10 @@ def coletar_dados_copa():
                 }
                 lista_final.append(item)
             except Exception as e:
-                print(f"      ⚠️ Erro no item: {e}")
+                print(f"      ⚠️ Erro ao processar item: {e}")
 
         if lista_final:
             df = pd.DataFrame(lista_final)
-            # Schema garantindo consistência
             schema = [
                 bigquery.SchemaField("nome_copa", "STRING"),
                 bigquery.SchemaField("liga_slug", "STRING"),
