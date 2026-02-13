@@ -60,25 +60,18 @@ def limpar_dados_da_copa(client, slug):
 
 def caçar_jogos_recursivo(dados):
     """
-    Mergulha na estrutura JSON (seja dict ou list) e encontra
-    qualquer objeto que pareça um jogo (tenha 'time_mandante_id').
+    Encontra objetos de jogo (com 'time_mandante_id') em qualquer nível de aninhamento.
     """
-    jogos_encontrados = []
-    
+    jogos = []
     if isinstance(dados, dict):
-        # Se achou a assinatura de um jogo, retorna ele
         if 'time_mandante_id' in dados:
             return [dados]
-        # Se não, continua procurando nos valores
-        for val in dados.values():
-            jogos_encontrados.extend(caçar_jogos_recursivo(val))
-            
+        for v in dados.values():
+            jogos.extend(caçar_jogos_recursivo(v))
     elif isinstance(dados, list):
-        # Se for lista, procura em cada item
         for item in dados:
-            jogos_encontrados.extend(caçar_jogos_recursivo(item))
-            
-    return jogos_encontrados
+            jogos.extend(caçar_jogos_recursivo(item))
+    return jogos
 
 def buscar_parciais_globais(headers):
     url = "https://api.cartola.globo.com/atletas/pontuados"
@@ -112,7 +105,7 @@ def calcular_pontuacao_completa(time_id, mapa_pontos, mapa_status_jogos, headers
     """
     Calcula pontuação com:
     1. Substituição Padrão (Tapa-Buraco)
-    2. Substituição de Luxo (Desempenho)
+    2. Substituição de Luxo (Desempenho) - Regra 2026
     3. Capitão
     """
     if not time_id or str(time_id) == "0": return 0.0
@@ -126,7 +119,7 @@ def calcular_pontuacao_completa(time_id, mapa_pontos, mapa_status_jogos, headers
         titulares_raw = dados.get('atletas', [])
         reservas_raw = dados.get('reservas', [])
         capitao_id = dados.get('capitao_id')
-        reserva_luxo_id = dados.get('reserva_luxo_id') # ID do reserva especial
+        reserva_luxo_id = dados.get('reserva_luxo_id') # Campo chave de 2026
         
         # Prepara titulares com pontuação atual
         titulares_ativos = []
@@ -147,8 +140,7 @@ def calcular_pontuacao_completa(time_id, mapa_pontos, mapa_status_jogos, headers
             
             # Só substitui se jogo acabou e pontos = 0
             if status_jogo == "ENCERRADA" and titular['pontos'] == 0.0:
-                # Busca reserva da mesma posição (excluindo o Luxo num primeiro momento se quiser, ou geral)
-                # Aqui pegamos qualquer reserva válido da posição
+                # Busca reserva da mesma posição
                 reserva = next((r for r in reservas_raw 
                                 if r['posicao_id'] == titular['posicao_id'] 
                                 and mapa_pontos.get(r['atleta_id'], 0.0) != 0.0), None)
@@ -190,7 +182,7 @@ def calcular_pontuacao_completa(time_id, mapa_pontos, mapa_status_jogos, headers
                                 'atleta_id': reserva_luxo_id,
                                 'pontos': luxo_pts,
                                 'clube_id': luxo_obj['clube_id']
-                                # Capitania é mantida no slot
+                                # Mantém capitania se titular era capitão (herança padrão)
                             })
 
         # 3. SOMA FINAL
@@ -211,7 +203,9 @@ def coletar_dados_copa():
     copas = carregar_configuracao()
     if not copas: return
     token = get_token()
-    if not token: return
+    if not token: 
+        print("❌ Token não encontrado.")
+        return
     
     headers = {'Authorization': f'Bearer {token}', 'User-Agent': 'Mozilla/5.0'}
     client = get_bq_client()
@@ -232,21 +226,33 @@ def coletar_dados_copa():
 
         try:
             resp = requests.get(f"https://api.cartola.globo.com/auth/liga/{slug}", headers=headers, timeout=30)
+            if resp.status_code != 200:
+                print(f"      ❌ Erro API: {resp.status_code}")
+                continue
+
             dados = resp.json()
             
-            # --- CORREÇÃO DO ERRO 'LIST' ---
-            # Usa a função caçadora para achar os jogos onde quer que estejam
+            # --- CAÇADOR DE JOGOS ---
             raw_chaves = dados.get('chaves_mata_mata', {})
-            todos_jogos = caçar_jogos_recursivo(raw_chaves)
+            todos_jogos_brutos = caçar_jogos_recursivo(raw_chaves)
             
-            print(f"      🔎 Jogos encontrados: {len(todos_jogos)}")
+            print(f"      🔎 Jogos encontrados: {len(todos_jogos_brutos)}")
             
             dic_times = dados.get('times', {})
             lista_final = []
             rodada_atual = dados['liga'].get('rodada_atual', 0)
 
-            for jogo in todos_jogos:
+            for jogo in todos_jogos_brutos:
                 try:
+                    # --- CORREÇÃO DE LISTA (O GRANDE FIX) ---
+                    # Se por acaso o 'jogo' ainda estiver dentro de uma lista (ex: [dict]), desenbrulha
+                    if isinstance(jogo, list):
+                        if len(jogo) > 0: jogo = jogo[0]
+                        else: continue
+                    
+                    if not isinstance(jogo, dict):
+                        continue
+
                     # Extração segura
                     id_a = str(jogo.get('time_mandante_id'))
                     id_b = str(jogo.get('time_visitante_id'))
@@ -264,7 +270,7 @@ def coletar_dados_copa():
                         pts_a = calcular_pontuacao_completa(id_a, mapa_parciais, mapa_status, headers)
                         pts_b = calcular_pontuacao_completa(id_b, mapa_parciais, mapa_status, headers)
                         
-                        # Fallback se der erro
+                        # Fallback se der erro no cálculo e API tiver valor
                         if pts_a == 0.0 and pts_a_api > 0: pts_a = pts_a_api
                         if pts_b == 0.0 and pts_b_api > 0: pts_b = pts_b_api
 
@@ -300,8 +306,6 @@ def coletar_dados_copa():
 
             if lista_final:
                 df = pd.DataFrame(lista_final)
-                # Schema omitido para brevidade (já está configurado no BQ autodetect ou manual)
-                # Mas mantendo o LoadConfig para garantir
                 job_config = bigquery.LoadJobConfig(
                     schema=[
                         bigquery.SchemaField("nome_copa", "STRING"),
@@ -324,6 +328,8 @@ def coletar_dados_copa():
                 )
                 client.load_table_from_dataframe(df, TAB_COPA, job_config=job_config).result()
                 print(f"      ✅ SUCESSO! {len(df)} jogos salvos (Com Luxo e Parciais).")
+            else:
+                print("      ⚠️ Nenhum jogo processado.")
                 
         except Exception as e:
             print(f"      ❌ Erro fatal: {e}")
