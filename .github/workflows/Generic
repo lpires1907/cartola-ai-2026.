@@ -1,0 +1,33 @@
+name: 🕵️ Rodar Debug (Genérico)
+
+on:
+  workflow_dispatch:
+    inputs:
+      nome_arquivo:
+        description: 'Nome do arquivo Python para rodar (ex: debug_partidas.py)'
+        required: true
+        default: 'debug_partidas.py'
+
+jobs:
+  diagnostico:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Baixar Código
+        uses: actions/checkout@v3
+
+      - name: 🐍 Configurar Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: 📦 Instalar Dependências
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests python-dotenv pandas google-cloud-bigquery
+
+      - name: 🚀 Executar Script de Diagnóstico
+        env:
+          # Injetamos o Token para os scripts poderem acessar a API
+          CARTOLA_GLBID: ${{ secrets.CARTOLA_GLBID }}
+        run: python ${{ inputs.nome_arquivo }}
