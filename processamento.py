@@ -6,12 +6,12 @@ def recriar_view_consolidada(client, dataset_id):
     view_id = f"{client.project}.{dataset_id}.view_consolidada_times"
     tab_historico = f"{client.project}.{dataset_id}.historico"
     
-    print(f"🔨 (Re)Construindo View Consolidada Inteligente: {view_id}")
+    print(f"🔨 (Re)Construindo View Consolidada Blindada: {view_id}")
 
     query = f"""
     CREATE OR REPLACE VIEW `{view_id}` AS
     WITH Unificado AS (
-        -- Escolhe apenas 1 registro por time/rodada. Prioridade: OFICIAL > PARCIAL
+        -- Seleciona apenas 1 registro por time/rodada. Prioridade: OFICIAL > PARCIAL
         SELECT * EXCEPT(rn) FROM (
             SELECT *, ROW_NUMBER() OVER(
                 PARTITION BY nome, rodada 
@@ -25,6 +25,8 @@ def recriar_view_consolidada(client, dataset_id):
         MAX(nome_cartola) as nome_cartola,
         SUM(pontos) as total_geral,
         AVG(pontos) as media,
+        MAX(pontos) as maior_pontuacao, -- Restaurado para corrigir o erro do Streamlit
+        MIN(pontos) as menor_pontuacao,
         COUNT(DISTINCT rodada) as rodadas_jogadas,
         MAX(patrimonio) as patrimonio_atual,
         -- Blocos de turnos e meses
@@ -47,7 +49,6 @@ def recriar_view_consolidada(client, dataset_id):
     print("✅ View Consolidada atualizada!")
 
 def atualizar_campeoes_mensais(client, dataset_id):
-    # (Mantido igual à sua versão anterior, apenas com correções de Bandit se necessário)
     pass
 
 if __name__ == "__main__":

@@ -34,9 +34,9 @@ def limpar_dados_rodada_e_futuro(client, rodada_alvo):
     """Apaga a rodada alvo e qualquer rodada futura (limpeza de fantasmas)."""
     print(f"🧹 Limpando dados da Rodada {rodada_alvo} e possíveis fantasmas futuros...")
     for t in [TAB_HISTORICO, TAB_ESCALACOES]:
-        # Deleta a rodada atual E qualquer rodada maior que ela que tenha sido criada por erro
-        query = f"DELETE FROM `{client.project}.{t}` WHERE rodada >= {rodada_alvo}"
-        client.query(query).result() # nosec B608
+        # O # nosec B608 deve estar no final da linha que contém a string da query para o Bandit
+        query = f"DELETE FROM `{client.project}.{t}` WHERE rodada >= {rodada_alvo}" # nosec B608
+        client.query(query).result()
 
 def rodar_coleta():
     client = get_bq_client()
@@ -45,15 +45,15 @@ def rodar_coleta():
     r_atual = st.get('rodada_atual', 0)
     status_mercado = st.get('status_mercado') # 1: Aberto, 2: Fechado/Live
     
-    # LÓGICA DE DECISÃO DE RODADA
-    if status_mercado == 1: # Mercado Aberto (Momento de fechar a rodada que passou)
+    # LÓGICA DE TRANSIÇÃO
+    if status_mercado == 1:
         r_alvo = r_atual - 1
         tipo_dado = "OFICIAL"
-    else: # Mercado Fechado / Live (Rodada em andamento)
+    else:
         r_alvo = r_atual
         tipo_dado = "PARCIAL"
 
-    print(f"🎯 Iniciando coleta: Rodada {r_alvo} ({tipo_dado})")
+    print(f"🎯 Alvo: Rodada {r_alvo} ({tipo_dado}) na liga {LIGA_SLUG}")
 
     res_liga = requests.get(f"https://api.cartola.globo.com/auth/liga/{LIGA_SLUG}", headers=get_pro_headers(), timeout=TIMEOUT).json()
     ts = datetime.now(pytz.timezone('America/Sao_Paulo'))
@@ -62,15 +62,14 @@ def rodar_coleta():
     for t_obj in res_liga.get('times', []):
         tid = t_obj['time_id']
         
-        # OFICIAL: Busca no endpoint de histórico travado
         if tipo_dado == "OFICIAL":
+            # Busca no histórico oficial para evitar resíduos de rodadas futuras
             url = f"https://api.cartola.globo.com/time/id/{tid}/{r_alvo}"
             res_t = requests.get(url, headers=get_public_headers(), timeout=TIMEOUT).json()
             pts = float(res_t.get('pontos', 0.0))
             atletas = res_t.get('atletas', [])
             patrimonio = float(res_t.get('patrimonio', 0.0))
         else:
-            # PARCIAL: Busca escalação atual
             url = f"https://api.cartola.globo.com/time/id/{tid}"
             res_t = requests.get(url, headers=get_public_headers(), timeout=TIMEOUT).json()
             pts = float(t_obj.get('pontos', {}).get('rodada', 0.0))
@@ -95,11 +94,10 @@ def rodar_coleta():
         time.sleep(0.1)
 
     if l_h:
-        # Limpa o passado e o futuro indevido antes de salvar
         limpar_dados_rodada_e_futuro(client, r_alvo)
         client.load_table_from_dataframe(pd.DataFrame(l_h), f"{client.project}.{TAB_HISTORICO}").result()
         client.load_table_from_dataframe(pd.DataFrame(l_e), f"{client.project}.{TAB_ESCALACOES}").result()
-        print(f"✅ Sucesso: Rodada {r_alvo} salva como {tipo_dado}!")
+        print(f"✅ Sincronização concluída!")
 
 if __name__ == "__main__":
     rodar_coleta()
