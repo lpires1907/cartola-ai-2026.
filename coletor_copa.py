@@ -20,7 +20,8 @@ MAPA_FASES = {
     "O": "Oitavas de Final",
     "Q": "Quartas de Final",
     "S": "Semifinal",
-    "F": "Final"
+    "F": "Final",
+    "T": "Disputa de 3º Lugar"
 }
 
 def get_bq_client():
@@ -194,7 +195,7 @@ def coletar_dados_copa():
     mapa_parciais = buscar_parciais_globais(headers)
     mapa_status = buscar_status_partidas(headers)
     
-    print(f"🏆 Processando Copas (Versão BLINDADA)...")
+    print(f"🏆 Processando Copas (Versão FIX: LISTA DE TIMES)...")
 
     for copa in copas:
         slug = copa.get('slug')
@@ -210,33 +211,50 @@ def coletar_dados_copa():
                 continue
 
             dados = resp.json()
+            
+            # --- FIX CRÍTICO: NORMALIZAÇÃO DE 'TIMES' ---
+            # O erro acontecia porque 'times' pode vir como LISTA em vez de DICT
+            raw_times = dados.get('times', {})
+            dic_times = {}
+            
+            if isinstance(raw_times, list):
+                # Se for lista, converte para dict usando o time_id como chave
+                for t in raw_times:
+                    # Tenta pegar ID (pode ser time_id ou id)
+                    tid = str(t.get('time_id') or t.get('id'))
+                    if tid:
+                        dic_times[tid] = t
+            elif isinstance(raw_times, dict):
+                # Se já for dict, usa direto
+                dic_times = raw_times
+            else:
+                print(f"      ⚠️ Formato de 'times' desconhecido: {type(raw_times)}")
+
+            
+            # --- CAÇADOR DE JOGOS ---
             raw_chaves = dados.get('chaves_mata_mata', {})
             todos_jogos_brutos = caçar_jogos_recursivo(raw_chaves)
             
             print(f"      🔎 Jogos encontrados: {len(todos_jogos_brutos)}")
             
-            dic_times = dados.get('times', {})
             lista_final = []
             rodada_atual = dados['liga'].get('rodada_atual', 0)
 
             for i, jogo in enumerate(todos_jogos_brutos):
                 try:
-                    # --- PROTEÇÃO EXTREMA ---
-                    # Se for lista, pega o primeiro item
+                    # Proteção para jogos aninhados em listas
                     if isinstance(jogo, list):
                         if len(jogo) > 0: jogo = jogo[0]
-                        else: continue # Lista vazia
+                        else: continue
                     
-                    # Se depois disso não for dict, pula e avisa
-                    if not isinstance(jogo, dict):
-                        print(f"      ⚠️ Item {i} ignorado (Não é dict): {type(jogo)}")
-                        continue
+                    if not isinstance(jogo, dict): continue
 
-                    # Extração (Agora segura)
+                    # Extração dos IDs
                     id_a = str(jogo.get('time_mandante_id'))
                     id_b = str(jogo.get('time_visitante_id'))
                     id_win = str(jogo.get('vencedor_id'))
                     
+                    # Definição de Pontos
                     pts_a_api = float(jogo.get('time_mandante_pontuacao') or 0.0)
                     pts_b_api = float(jogo.get('time_visitante_pontuacao') or 0.0)
                     
@@ -246,13 +264,15 @@ def coletar_dados_copa():
                     if mapa_parciais:
                         pts_a = calcular_pontuacao_completa(id_a, mapa_parciais, mapa_status, headers)
                         pts_b = calcular_pontuacao_completa(id_b, mapa_parciais, mapa_status, headers)
-                        # Fallback
+                        
+                        # Fallback: Se der erro no cálculo (0.0) mas API tiver valor, usa API
                         if pts_a == 0.0 and pts_a_api > 0: pts_a = pts_a_api
                         if pts_b == 0.0 and pts_b_api > 0: pts_b = pts_b_api
 
-                    # Montagem
+                    # Montagem do registro - AGORA SEGURO com dic_times normalizado
                     t_a = dic_times.get(id_a, {})
                     t_b = dic_times.get(id_b, {})
+                    
                     fase = MAPA_FASES.get(jogo.get('tipo_fase'), 'Fase')
                     
                     win_slug = None
@@ -277,12 +297,10 @@ def coletar_dados_copa():
                     })
 
                 except Exception as e:
-                    # Imprime o objeto problemático para debug
-                    print(f"      ❌ Erro no jogo {i}: {e} | Dados: {jogo}")
+                    print(f"      ⚠️ Erro processando jogo {i}: {e}")
 
             if lista_final:
                 df = pd.DataFrame(lista_final)
-                # Schema omitido para brevidade, mantenha o seu padrão se preferir
                 job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND", schema_update_options=[bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION])
                 client.load_table_from_dataframe(df, TAB_COPA, job_config=job_config).result()
                 print(f"      ✅ SUCESSO! {len(df)} jogos salvos.")
