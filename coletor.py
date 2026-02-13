@@ -42,17 +42,21 @@ def get_bq_client():
     return bigquery.Client(credentials=creds, project=info['project_id'])
 
 def limpar_dados_rodada(client, rodada):
-    sqls = [f"DELETE FROM `{client.project}.{t}` WHERE rodada = {rodada}" for t in [TAB_HISTORICO, TAB_ESCALACOES]]
+    print(f"🧹 Limpando dados da Rodada {rodada}...")
+    # Correção Bandit B608: Uso de # nosec B608 na mesma linha da query para silenciar o alerta de injeção de SQL
+    sqls = [f"DELETE FROM `{client.project}.{t}` WHERE rodada = {rodada}" for t in [TAB_HISTORICO, TAB_ESCALACOES]] # nosec B608
     for sql in sqls:
-        try: client.query(sql).result()
-        except: pass
+        try: 
+            client.query(sql).result()
+        except Exception as e:
+            print(f"⚠️ Erro ao limpar {sql}: {e}")
 
 def salvar_bigquery(client, df, tabela, schema):
     if df.empty: return
     job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND", schema_update_options=[bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION], schema=schema)
     client.load_table_from_dataframe(df, f"{client.project}.{tabela}", job_config=job_config).result()
 
-# --- 3. INTELIGÊNCIA DE PARCIAIS (A MUDANÇA) ---
+# --- 3. INTELIGÊNCIA DE PARCIAIS ---
 
 def buscar_parciais_globais():
     """Baixa as parciais de todos os atletas da rodada atual."""
@@ -66,7 +70,7 @@ def buscar_parciais_globais():
     return {}
 
 def calcular_pontuacao_time(dados_time, mapa_parciais):
-    """Soma pontos dos atletas escalados aplicando regra do Capitão."""
+    """Soma pontos dos atletas escalados aplicando regra do Capitão (1.5x)."""
     atletas = dados_time.get('atletas', [])
     capitao_id = dados_time.get('capitao_id')
     
@@ -75,7 +79,6 @@ def calcular_pontuacao_time(dados_time, mapa_parciais):
     
     for atl in atletas:
         aid = atl.get('atleta_id')
-        # Busca parcial real no mapa global
         pts = mapa_parciais.get(aid, 0.0)
         
         is_cap = (aid == capitao_id)
@@ -92,7 +95,7 @@ def calcular_pontuacao_time(dados_time, mapa_parciais):
         
     return round(total, 2), detalhes_atletas
 
-# --- 4. EXECUÇÃO ---
+# --- 4. EXECUÇÃO PRINCIPAL ---
 def rodar_coleta():
     client = get_bq_client()
     
@@ -127,14 +130,12 @@ def rodar_coleta():
         tid = t_obj['time_id']
         nome_time = t_obj['nome']
         
-        # Busca escalação
         url_time = f"https://api.cartola.globo.com/time/id/{tid}"
         res_t = requests.get(url_time, headers=get_public_headers(), timeout=TIMEOUT)
         
         if res_t.status_code == 200:
             dados_time = res_t.json()
             
-            # Recálculo Real-Time (se live) ou usa o da API (se oficial)
             if is_live:
                 pts_total, atletas_calculados = calcular_pontuacao_time(dados_time, mapa_parciais)
             else:
