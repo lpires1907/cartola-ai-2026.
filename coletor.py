@@ -92,9 +92,22 @@ def rodar_coleta():
 
     for t_obj in res_liga.get('times', []):
         res_t = requests.get(f"https://api.cartola.globo.com/time/id/{t_obj['time_id']}", headers=get_public_headers(), timeout=TIMEOUT).json()
+        
+        info_t = res_t.get('time', {})
+        v_nome_cartola = info_t.get('nome_cartola') or t_obj.get('nome_cartola') or "Sem Nome"
+        v_patrimonio = float(res_t.get('patrimonio') or info_t.get('patrimonio') or 0.0)
+
         pts, atl_f = calcular_pontos(res_t, m_pts, m_sts) if is_live else (t_obj.get('pontos', {}).get('rodada', 0.0), [])
         
-        l_h.append({'nome': t_obj['nome'], 'nome_cartola': t_obj['nome_cartola'], 'pontos': float(pts), 'patrimonio': float(res_t.get('patrimonio', 0.0)), 'rodada': int(r_alvo), 'timestamp': ts, 'tipo_dado': "PARCIAL" if is_live else "OFICIAL"})
+        l_h.append({
+            'nome': t_obj['nome'], 
+            'nome_cartola': v_nome_cartola, 
+            'pontos': float(pts), 
+            'patrimonio': v_patrimonio, 
+            'rodada': int(r_alvo), 
+            'timestamp': ts, 
+            'tipo_dado': "PARCIAL" if is_live else "OFICIAL"
+        })
         for a in (atl_f if atl_f else res_t.get('atletas', [])):
             l_e.append({'rodada': int(r_alvo), 'liga_time_nome': t_obj['nome'], 'atleta_apelido': a.get('ap') or a.get('apelido'), 'atleta_posicao': pos.get(str(a.get('pos') or a.get('posicao_id')), ''), 'pontos': float(a.get('pts') or a.get('pontos_num', 0.0)), 'is_capitao': a.get('cap') or (a.get('atleta_id') == res_t.get('capitao_id')), 'timestamp': ts})
         time.sleep(0.2)
