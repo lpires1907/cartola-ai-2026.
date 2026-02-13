@@ -119,9 +119,8 @@ def calcular_pontuacao_completa(time_id, mapa_pontos, mapa_status_jogos, headers
         titulares_raw = dados.get('atletas', [])
         reservas_raw = dados.get('reservas', [])
         capitao_id = dados.get('capitao_id')
-        reserva_luxo_id = dados.get('reserva_luxo_id') # Campo chave de 2026
+        reserva_luxo_id = dados.get('reserva_luxo_id') 
         
-        # Prepara titulares com pontuação atual
         titulares_ativos = []
         for t in titulares_raw:
             pid = t['atleta_id']
@@ -134,55 +133,42 @@ def calcular_pontuacao_completa(time_id, mapa_pontos, mapa_status_jogos, headers
                 'apelido': t['apelido']
             })
 
-        # 1. SUBSTITUIÇÃO PADRÃO (Quem não jogou)
+        # 1. SUBSTITUIÇÃO PADRÃO
         for i, titular in enumerate(titulares_ativos):
             status_jogo = mapa_status_jogos.get(titular['clube_id'], 'PRE_JOGO')
-            
-            # Só substitui se jogo acabou e pontos = 0
             if status_jogo == "ENCERRADA" and titular['pontos'] == 0.0:
-                # Busca reserva da mesma posição
                 reserva = next((r for r in reservas_raw 
                                 if r['posicao_id'] == titular['posicao_id'] 
                                 and mapa_pontos.get(r['atleta_id'], 0.0) != 0.0), None)
-                
                 if reserva:
-                    # Aplica a troca
                     titulares_ativos[i].update({
                         'atleta_id': reserva['atleta_id'],
                         'pontos': mapa_pontos.get(reserva['atleta_id'], 0.0),
                         'clube_id': reserva['clube_id'],
                         'apelido': reserva['apelido']
                     })
-                    reservas_raw.remove(reserva) # Gasta o reserva
+                    reservas_raw.remove(reserva)
 
-        # 2. SUBSTITUIÇÃO DE LUXO (Desempenho)
+        # 2. SUBSTITUIÇÃO DE LUXO
         if reserva_luxo_id:
-            # Acha o objeto do Luxo se ele ainda estiver no banco
             luxo_obj = next((r for r in reservas_raw if r['atleta_id'] == reserva_luxo_id), None)
-            
             if luxo_obj:
                 luxo_pts = mapa_pontos.get(reserva_luxo_id, 0.0)
                 pos_luxo = luxo_obj['posicao_id']
-                
-                # Filtra titulares da mesma posição
                 concorrentes = [t for t in titulares_ativos if t['posicao_id'] == pos_luxo]
                 
                 if concorrentes:
-                    # Verifica se TODOS os jogos da posição acabaram
                     ids_clubes = [t['clube_id'] for t in concorrentes] + [luxo_obj['clube_id']]
                     todos_fim = all(mapa_status_jogos.get(cid) == "ENCERRADA" for cid in ids_clubes)
                     
                     if todos_fim:
                         pior_titular = min(concorrentes, key=lambda x: x['pontos'])
-                        
-                        # Se o Luxo for melhor que o pior titular, troca!
                         if luxo_pts > pior_titular['pontos']:
                             idx = titulares_ativos.index(pior_titular)
                             titulares_ativos[idx].update({
                                 'atleta_id': reserva_luxo_id,
                                 'pontos': luxo_pts,
                                 'clube_id': luxo_obj['clube_id']
-                                # Mantém capitania se titular era capitão (herança padrão)
                             })
 
         # 3. SOMA FINAL
@@ -215,7 +201,7 @@ def coletar_dados_copa():
     mapa_parciais = buscar_parciais_globais(headers)
     mapa_status = buscar_status_partidas(headers)
     
-    print(f"🏆 Processando Copas...")
+    print(f"🏆 Processando Copas (Versão DEBUG)...")
 
     for copa in copas:
         slug = copa.get('slug')
@@ -242,23 +228,29 @@ def coletar_dados_copa():
             lista_final = []
             rodada_atual = dados['liga'].get('rodada_atual', 0)
 
-            for jogo in todos_jogos_brutos:
+            for i, jogo in enumerate(todos_jogos_brutos):
                 try:
-                    # --- CORREÇÃO DE LISTA (O GRANDE FIX) ---
-                    # Se por acaso o 'jogo' ainda estiver dentro de uma lista (ex: [dict]), desenbrulha
-                    if isinstance(jogo, list):
-                        if len(jogo) > 0: jogo = jogo[0]
-                        else: continue
+                    # --- CORREÇÃO DE LISTA BLINDADA COM DEBUG ---
                     
+                    # 1. Se for lista, pega o primeiro item
+                    if isinstance(jogo, list):
+                        if len(jogo) > 0:
+                            jogo = jogo[0]
+                        else:
+                            print(f"      ⚠️ Jogo {i} é uma lista vazia. Pulando.")
+                            continue
+                    
+                    # 2. Se NÃO for dicionário, imprime o erro fatal e pula
                     if not isinstance(jogo, dict):
+                        print(f"      ❌ ERRO FATAL: Item {i} não é dict! Tipo: {type(jogo)} - Conteúdo: {jogo}")
                         continue
-
-                    # Extração segura
+                    
+                    # Agora é 100% seguro chamar .get()
                     id_a = str(jogo.get('time_mandante_id'))
                     id_b = str(jogo.get('time_visitante_id'))
                     id_win = str(jogo.get('vencedor_id'))
                     
-                    # Definição de Pontos (API ou Cálculo)
+                    # Definição de Pontos
                     pts_a_api = float(jogo.get('time_mandante_pontuacao') or 0.0)
                     pts_b_api = float(jogo.get('time_visitante_pontuacao') or 0.0)
                     
@@ -302,7 +294,7 @@ def coletar_dados_copa():
                     })
 
                 except Exception as e:
-                    print(f"      ⚠️ Erro processando jogo: {e}")
+                    print(f"      ⚠️ Erro processando jogo {i}: {e}")
 
             if lista_final:
                 df = pd.DataFrame(lista_final)
