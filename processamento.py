@@ -8,6 +8,7 @@ def recriar_view_consolidada(client, dataset_id):
     
     print(f"🔨 (Re)Construindo View Consolidada Blindada: {view_id}")
 
+    # A Query agora agrupa APENAS pelo nome do time e pega o MAX dos metadados
     query = f"""
     CREATE OR REPLACE VIEW `{view_id}` AS
     SELECT 
@@ -16,13 +17,14 @@ def recriar_view_consolidada(client, dataset_id):
         SUM(pontos) as total_geral,
         AVG(pontos) as media,
         MAX(pontos) as maior_pontuacao,
-        MIN(pontos) as menor_pontuacao,
         COUNT(DISTINCT rodada) as rodadas_jogadas,
         MAX(patrimonio) as patrimonio_atual,
         
+        -- Turnos
         SUM(CASE WHEN rodada <= 19 THEN pontos ELSE 0 END) as pontos_turno_1,
         SUM(CASE WHEN rodada > 19 THEN pontos ELSE 0 END) as pontos_turno_2,
         
+        -- Meses
         SUM(CASE WHEN rodada BETWEEN 1 AND 8 THEN pontos ELSE 0 END) as pontos_jan_fev,
         SUM(CASE WHEN rodada BETWEEN 9 AND 12 THEN pontos ELSE 0 END) as pontos_marco,
         SUM(CASE WHEN rodada BETWEEN 13 AND 16 THEN pontos ELSE 0 END) as pontos_abril,
@@ -34,18 +36,17 @@ def recriar_view_consolidada(client, dataset_id):
         SUM(CASE WHEN rodada >= 37 THEN pontos ELSE 0 END) as pontos_nov_dez
 
     FROM `{tab_historico}`
-    GROUP BY nome
+    GROUP BY nome -- SEGURANÇA: Agrupa apenas pelo nome principal
     ORDER BY total_geral DESC
     """ # nosec B608
 
     try:
         client.query(query).result()
-        print("✅ View Consolidada atualizada com sucesso!")
+        print("✅ View Consolidada atualizada!")
     except Exception as e:
-        print(f"❌ Erro ao criar View: {e}")
+        print(f"❌ Erro na View: {e}")
 
 def atualizar_campeoes_mensais(client, dataset_id):
-    print("📊 Atualizando Tabela de Campeões Mensais...")
     tab_historico = f"{client.project}.{dataset_id}.historico"
     tab_mensal = f"{client.project}.{dataset_id}.Rodada_Mensal"
 
@@ -74,13 +75,7 @@ def atualizar_campeoes_mensais(client, dataset_id):
     WHEN MATCHED THEN
         UPDATE SET `Campeao ` = S.campeao, Vice = S.vice, DataStatus = S.data_up
     """ # nosec B608
-    
-    try:
-        client.query(query_merge).result()
-        print("✅ Tabela Mensal de Campeões atualizada!")
-    except Exception as e:
-        print(f"⚠️ Aviso: {e}")
+    client.query(query_merge).result()
 
 if __name__ == "__main__":
-    # Inserir lógica de conexão BQ se necessário para teste local
     pass

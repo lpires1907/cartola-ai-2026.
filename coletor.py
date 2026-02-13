@@ -31,7 +31,9 @@ def get_bq_client():
     return bigquery.Client(credentials=service_account.Credentials.from_service_account_info(info), project=info['project_id'])
 
 def limpar_dados_rodada(client, rodada):
+    print(f"🧹 Limpando todos os registros (Parciais e Oficiais) da Rodada {rodada}...")
     for t in [TAB_HISTORICO, TAB_ESCALACOES]:
+        # Deleta qualquer dado da rodada para evitar somas duplicadas
         client.query(f"DELETE FROM `{client.project}.{t}` WHERE rodada = {rodada}").result() # nosec B608
 
 def buscar_parciais_globais():
@@ -75,13 +77,19 @@ def calcular_pontos(dados, m_pts, m_sts):
                 if m_pts.get(lux_id, 0.0) > pior['pts']:
                     tits[tits.index(pior)].update({'id': lux_id, 'pts': m_pts.get(lux_id, 0.0), 'ap': lx['apelido']})
 
-    return round(sum((t['pts'] * 1.5 if t['cap'] else t['pts']) for t in tits), 2), tits
+    return round(sum((t['pts'] * 1.5 if t['cap'] else t['pts']) for tit in tits), 2), tits
 
 def rodar_coleta():
     client = get_bq_client()
     st = requests.get("https://api.cartola.globo.com/mercado/status", headers=get_public_headers(), timeout=TIMEOUT).json()
-    r_alvo = st.get('rodada_atual', 0)
+    r_atual = st.get('rodada_atual', 0)
+    mercado_aberto = (st.get('status_mercado') == 1)
+    
+    # Se mercado está aberto, a rodada que acabou de fechar é a anterior
+    r_alvo = (r_atual - 1) if mercado_aberto else r_atual
     is_live = (st.get('status_mercado') == 2)
+    tipo_dado = "PARCIAL" if is_live else "OFICIAL"
+    
     m_pts = buscar_parciais_globais() if is_live else {}
     m_sts = buscar_status_partidas() if is_live else {}
 
@@ -97,8 +105,13 @@ def rodar_coleta():
         v_nome_cartola = info_t.get('nome_cartola') or t_obj.get('nome_cartola') or "Sem Nome"
         v_patrimonio = float(res_t.get('patrimonio') or info_t.get('patrimonio') or 0.0)
 
-        pts, atl_f = calcular_pontos(res_t, m_pts, m_sts) if is_live else (t_obj.get('pontos', {}).get('rodada', 0.0), [])
-        
+        # Se for oficial, usa o ponto que vem direto do objeto da liga/time para evitar erros de cálculo manual
+        if not is_live:
+            pts = float(t_obj.get('pontos', {}).get('rodada', 0.0))
+            atl_f = res_t.get('atletas', [])
+        else:
+            pts, atl_f = calcular_pontos(res_t, m_pts, m_sts)
+
         l_h.append({
             'nome': t_obj['nome'], 
             'nome_cartola': v_nome_cartola, 
@@ -106,17 +119,25 @@ def rodar_coleta():
             'patrimonio': v_patrimonio, 
             'rodada': int(r_alvo), 
             'timestamp': ts, 
-            'tipo_dado': "PARCIAL" if is_live else "OFICIAL"
+            'tipo_dado': tipo_dado
         })
-        for a in (atl_f if atl_f else res_t.get('atletas', [])):
-            l_e.append({'rodada': int(r_alvo), 'liga_time_nome': t_obj['nome'], 'atleta_apelido': a.get('ap') or a.get('apelido'), 'atleta_posicao': pos.get(str(a.get('pos') or a.get('posicao_id')), ''), 'pontos': float(a.get('pts') or a.get('pontos_num', 0.0)), 'is_capitao': a.get('cap') or (a.get('atleta_id') == res_t.get('capitao_id')), 'timestamp': ts})
-        time.sleep(0.2)
+        for a in atl_f:
+            l_e.append({
+                'rodada': int(r_alvo), 
+                'liga_time_nome': t_obj['nome'], 
+                'atleta_apelido': a.get('ap') or a.get('apelido'), 
+                'atleta_posicao': pos.get(str(a.get('pos') or a.get('posicao_id')), ''), 
+                'pontos': float(a.get('pts') or a.get('pontos_num', 0.0)), 
+                'is_capitao': a.get('cap') or (a.get('atleta_id') == res_t.get('capitao_id')), 
+                'timestamp': ts
+            })
+        time.sleep(0.1)
 
     if l_h:
         limpar_dados_rodada(client, r_alvo)
         client.load_table_from_dataframe(pd.DataFrame(l_h), f"{client.project}.{TAB_HISTORICO}").result()
         client.load_table_from_dataframe(pd.DataFrame(l_e), f"{client.project}.{TAB_ESCALACOES}").result()
-        print("✅ Liga sincronizada!")
+        print(f"✅ Liga sincronizada para a Rodada {r_alvo} ({tipo_dado})!")
 
 if __name__ == "__main__":
     rodar_coleta()
