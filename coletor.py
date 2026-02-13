@@ -43,23 +43,19 @@ def get_bq_client():
 
 def limpar_dados_rodada(client, rodada):
     print(f"🧹 Limpando dados da Rodada {rodada}...")
-    # Correção Bandit B608: Uso de # nosec B608 na mesma linha da query para silenciar o alerta de injeção de SQL
     sqls = [f"DELETE FROM `{client.project}.{t}` WHERE rodada = {rodada}" for t in [TAB_HISTORICO, TAB_ESCALACOES]] # nosec B608
     for sql in sqls:
-        try: 
-            client.query(sql).result()
-        except Exception as e:
-            print(f"⚠️ Erro ao limpar {sql}: {e}")
+        try: client.query(sql).result()
+        except: pass
 
-def salvar_bigquery(client, df, tabela, schema):
+def salvar_bigquery(client, df, tabela):
     if df.empty: return
-    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND", schema_update_options=[bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION], schema=schema)
+    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND", schema_update_options=[bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION])
     client.load_table_from_dataframe(df, f"{client.project}.{tabela}", job_config=job_config).result()
 
-# --- 3. INTELIGÊNCIA DE PARCIAIS ---
+# --- 3. ENGINE DE CÁLCULO (IGUAL À COPA) ---
 
 def buscar_parciais_globais():
-    """Baixa as parciais de todos os atletas da rodada atual."""
     url = "https://api.cartola.globo.com/atletas/pontuados"
     try:
         res = requests.get(url, headers=get_public_headers(), timeout=TIMEOUT)
@@ -69,87 +65,105 @@ def buscar_parciais_globais():
     except: pass
     return {}
 
-def calcular_pontuacao_time(dados_time, mapa_parciais):
-    """Soma pontos dos atletas escalados aplicando regra do Capitão (1.5x)."""
-    atletas = dados_time.get('atletas', [])
-    capitao_id = dados_time.get('capitao_id')
-    
-    total = 0.0
-    detalhes_atletas = []
-    
-    for atl in atletas:
-        aid = atl.get('atleta_id')
-        pts = mapa_parciais.get(aid, 0.0)
-        
-        is_cap = (aid == capitao_id)
-        pts_finais = pts * 1.5 if is_cap else pts
-        
-        total += pts_finais
-        detalhes_atletas.append({
-            'apelido': atl.get('apelido'),
-            'posicao_id': atl.get('posicao_id'),
-            'pontos': round(pts, 2),
-            'is_capitao': is_cap,
-            'atleta_id': aid
-        })
-        
-    return round(total, 2), detalhes_atletas
+def buscar_status_partidas():
+    url = "https://api.cartola.globo.com/partidas"
+    mapa_status = {}
+    try:
+        res = requests.get(url, headers=get_public_headers(), timeout=TIMEOUT)
+        if res.status_code == 200:
+            partidas = res.json().get('partidas', [])
+            for p in partidas:
+                status = p.get('status_transmissao_tr', 'PRE_JOGO')
+                mapa_status[p['clube_casa_id']] = status
+                mapa_status[p['clube_visitante_id']] = status
+    except: pass
+    return mapa_status
 
-# --- 4. EXECUÇÃO PRINCIPAL ---
+def calcular_pontuacao_completa(dados_time, mapa_pontos, mapa_status_jogos):
+    titulares_raw = dados_time.get('atletas', [])
+    reservas_raw = dados_time.get('reservas', [])
+    capitao_id = dados_time.get('capitao_id')
+    reserva_luxo_id = dados_time.get('reserva_luxo_id')
+    
+    titulares_ativos = []
+    for t in titulares_raw:
+        pid = t['atleta_id']
+        titulares_ativos.append({
+            'atleta_id': pid, 'posicao_id': t['posicao_id'], 'clube_id': t['clube_id'],
+            'apelido': t['apelido'], 'pontos': mapa_pontos.get(pid, 0.0), 'is_capitao': (pid == capitao_id)
+        })
+
+    # Substituição Simples (Se não pontuou e jogo acabou)
+    for i, titular in enumerate(titulares_ativos):
+        if mapa_status_jogos.get(titular['clube_id']) == "ENCERRADA" and titular['pontos'] == 0.0:
+            reserva = next((r for r in reservas_raw if r['posicao_id'] == titular['posicao_id'] and mapa_pontos.get(r['atleta_id'], 0.0) != 0.0), None)
+            if reserva:
+                titulares_ativos[i].update({'atleta_id': reserva['atleta_id'], 'pontos': mapa_pontos.get(reserva['atleta_id'], 0.0), 'apelido': reserva['apelido']})
+                reservas_raw.remove(reserva)
+
+    # Reserva de Luxo
+    if reserva_luxo_id:
+        luxo_obj = next((r for r in reservas_raw if r['atleta_id'] == reserva_luxo_id), None)
+        if luxo_obj:
+            luxo_pts = mapa_pontos.get(reserva_luxo_id, 0.0)
+            concorrentes = [t for t in titulares_ativos if t['posicao_id'] == luxo_obj['posicao_id']]
+            if concorrentes and all(mapa_status_jogos.get(t['clube_id']) == "ENCERRADA" for t in concorrentes):
+                pior = min(concorrentes, key=lambda x: x['pontos'])
+                if luxo_pts > pior['pontos']:
+                    idx = titulares_ativos.index(pior)
+                    titulares_ativos[idx].update({'atleta_id': reserva_luxo_id, 'pontos': luxo_pts, 'apelido': luxo_obj['apelido']})
+
+    soma = sum((t['pontos'] * 1.5 if t['is_capitao'] else t['pontos']) for t in titulares_ativos)
+    return round(soma, 2), titulares_ativos
+
+# --- 4. EXECUÇÃO ---
 def rodar_coleta():
     client = get_bq_client()
-    
-    # 1. Status do Mercado
     status_api = requests.get("https://api.cartola.globo.com/mercado/status", headers=get_public_headers(), timeout=TIMEOUT).json()
     rodada_alvo = status_api.get('rodada_atual', 0)
     is_live = (status_api.get('status_mercado') == 2)
     tipo_dado = "PARCIAL" if is_live else "OFICIAL"
     
-    print(f"🔄 Rodada Alvo: {rodada_alvo} ({tipo_dado})")
-
-    # 2. Busca Parciais Globais se estiver em jogo
     mapa_parciais = buscar_parciais_globais() if is_live else {}
-    if mapa_parciais: print(f"📡 {len(mapa_parciais)} parciais de atletas carregadas.")
+    mapa_status = buscar_status_partidas() if is_live else {}
 
-    # 3. Busca a Liga
-    url_liga = f"https://api.cartola.globo.com/auth/liga/{LIGA_SLUG}"
-    res_liga = requests.get(url_liga, headers=get_pro_headers(), timeout=TIMEOUT)
-    
-    if res_liga.status_code != 200:
-        print(f"❌ Erro ao acessar liga: {res_liga.status_code}")
-        return
+    res_liga = requests.get(f"https://api.cartola.globo.com/auth/liga/{LIGA_SLUG}", headers=get_pro_headers(), timeout=TIMEOUT)
+    if res_liga.status_code != 200: return
 
     times_liga = res_liga.json().get('times', [])
-    print(f"🚀 Recalculando pontos para {len(times_liga)} times...")
-
     ts_agora = datetime.now(pytz.timezone('America/Sao_Paulo'))
     l_hist, l_esc = [], []
     posicoes = {'1': 'Goleiro', '2': 'Lateral', '3': 'Zagueiro', '4': 'Meia', '5': 'Atacante', '6': 'Técnico'}
 
     for t_obj in times_liga:
         tid = t_obj['time_id']
-        nome_time = t_obj['nome']
-        
         url_time = f"https://api.cartola.globo.com/time/id/{tid}"
         res_t = requests.get(url_time, headers=get_public_headers(), timeout=TIMEOUT)
         
         if res_t.status_code == 200:
             dados_time = res_t.json()
             
+            # Cálculo unificado (igual à copa)
             if is_live:
-                pts_total, atletas_calculados = calcular_pontuacao_time(dados_time, mapa_parciais)
+                pts_total, atletas_finais = calcular_pontuacao_completa(dados_time, mapa_parciais, mapa_status)
             else:
                 pts_total = t_obj.get('pontos', {}).get('rodada', 0.0)
-                atletas_calculados = [{'apelido': a['apelido'], 'posicao_id': a['posicao_id'], 'pontos': a.get('pontos_num', 0.0), 'is_capitao': (a['atleta_id'] == dados_time.get('capitao_id'))} for a in dados_time.get('atletas', [])]
+                atletas_finais = [{'apelido': a['apelido'], 'posicao_id': a['posicao_id'], 'pontos': a.get('pontos_num', 0.0), 'is_capitao': (a['atleta_id'] == dados_time.get('capitao_id'))} for a in dados_time.get('atletas', [])]
 
+            # Correção: Captura de Nome do Cartola e Patrimônio
             l_hist.append({
-                'nome': nome_time, 'pontos': float(pts_total), 'rodada': int(rodada_alvo), 
-                'timestamp': ts_agora, 'tipo_dado': tipo_dado
+                'nome': t_obj.get('nome'),
+                'nome_cartola': t_obj.get('nome_cartola'), # Nome do dono do time
+                'pontos': float(pts_total),
+                'patrimonio': float(dados_time.get('patrimonio', 0.0)), # Patrimônio atualizado
+                'rodada': int(rodada_alvo),
+                'timestamp': ts_agora,
+                'tipo_dado': tipo_dado
             })
 
-            for a in atletas_calculados:
+            for a in atletas_finais:
                 l_esc.append({
-                    'rodada': int(rodada_alvo), 'liga_time_nome': nome_time,
+                    'rodada': int(rodada_alvo), 'liga_time_nome': t_obj.get('nome'),
                     'atleta_apelido': a['apelido'], 'atleta_posicao': posicoes.get(str(a['posicao_id']), ''),
                     'pontos': float(a['pontos']), 'is_capitao': a['is_capitao'],
                     'timestamp': ts_agora
@@ -158,9 +172,9 @@ def rodar_coleta():
 
     if l_hist:
         limpar_dados_rodada(client, rodada_alvo)
-        salvar_bigquery(client, pd.DataFrame(l_hist), TAB_HISTORICO, None)
-        salvar_bigquery(client, pd.DataFrame(l_esc), TAB_ESCALACOES, None)
-        print("✅ Dados de parciais salvos com sucesso!")
+        salvar_bigquery(client, pd.DataFrame(l_hist), TAB_HISTORICO)
+        salvar_bigquery(client, pd.DataFrame(l_esc), TAB_ESCALACOES)
+        print(f"✅ Liga sincronizada com as parciais da Copa!")
 
 if __name__ == "__main__":
     rodar_coleta()
