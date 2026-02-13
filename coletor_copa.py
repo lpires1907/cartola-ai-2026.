@@ -12,7 +12,7 @@ ARQUIVO_CONFIG = "copas.json"
 DATASET_ID = "cartola_analytics"
 TAB_COPA = f"{DATASET_ID}.copa_mata_mata"
 
-# Mapa de Fases (Converte códigos do Cartola para texto legível)
+# Mapa de Fases (Traduz os códigos do Cartola para nomes reais)
 MAPA_FASES = {
     "1": "32-avos de Final",
     "2": "16-avos de Final",
@@ -54,7 +54,7 @@ def carregar_configuracao():
 
 def limpar_dados_da_copa(client, slug):
     try:
-        # nosec: O slug vem do arquivo de configuração interno, seguro contra injection
+        # nosec: slug vem de config interna confiável
         query = f"DELETE FROM `{client.project}.{TAB_COPA}` WHERE liga_slug = '{slug}'" # nosec
         client.query(query).result()
         print(f"🧹 Dados antigos removidos para '{slug}'.")
@@ -93,7 +93,7 @@ def coletar_dados_copa():
         url = f"https://api.cartola.globo.com/auth/liga/{slug}"
         
         try:
-            # FIX DE SEGURANÇA: timeout adicionado para passar no Bandit
+            # FIX DE SEGURANÇA: timeout=30 para passar no Bandit
             resp = requests.get(url, headers=headers, timeout=30)
             
             if resp.status_code != 200:
@@ -103,58 +103,60 @@ def coletar_dados_copa():
             dados = resp.json()
             rodada_atual = dados['liga'].get('rodada_atual', 0)
             
-            # 1. Dicionário de Times (ID -> Dados)
-            # O Cartola manda os detalhes dos times (Nome, Escudo) separados dos confrontos
+            # --- LÓGICA DE CRUZAMENTO DE DADOS ---
+            
+            # 1. Pega o Dicionário de Times (onde estão nomes e escudos)
+            # O ID do time é a chave deste dicionário
             dic_times = dados.get('times', {})
             
-            # 2. Chaves do Mata-Mata
-            # Estrutura: {"1": [jogos], "2": [jogos]}
+            # 2. Pega os Confrontos (onde estão os IDs e pontuações)
             raw_chaves = dados.get('chaves_mata_mata', {})
             
-            lista_final = []
-
-            if isinstance(raw_chaves, list):
-                # Caso raro onde venha como lista direta
-                todos_jogos = raw_chaves
-            elif isinstance(raw_chaves, dict):
-                # Caso padrão: Dicionário agrupado por rodada/chave
-                todos_jogos = []
-                for _, lista in raw_chaves.items():
+            todos_jogos = []
+            
+            # O JSON vem como {"1": [jogos], "2": [jogos]} ou direto como lista
+            if isinstance(raw_chaves, dict):
+                for key_rodada, lista in raw_chaves.items():
                     if isinstance(lista, list):
                         todos_jogos.extend(lista)
-            else:
-                todos_jogos = []
+            elif isinstance(raw_chaves, list):
+                todos_jogos = raw_chaves
 
-            print(f"      🔎 Encontrados {len(todos_jogos)} jogos brutos.")
+            print(f"      🔎 Encontrados {len(todos_jogos)} jogos para processar.")
 
+            lista_final = []
+            
             for jogo in todos_jogos:
                 try:
-                    # IDs retornados pela API
+                    # Extrai IDs e Pontos usando as chaves corretas do Cartola
                     id_mandante = str(jogo.get('time_mandante_id'))
                     id_visitante = str(jogo.get('time_visitante_id'))
                     id_vencedor = str(jogo.get('vencedor_id'))
                     
                     # Identifica a Fase (Ex: "O" -> "Oitavas de Final")
-                    sigla_fase = jogo.get('tipo_fase', '')
-                    nome_fase = MAPA_FASES.get(sigla_fase, f"Fase {sigla_fase}")
+                    sigla_fase = jogo.get('tipo_fase', str(jogo.get('rodada_id', 'Fase Única')))
+                    nome_fase = MAPA_FASES.get(sigla_fase, f"Rodada {sigla_fase}")
 
-                    # Cruzamento de Dados: Busca nome e escudo no dicionário 'times'
+                    # --- CRUZAMENTO: Busca detalhes no dicionário 'times' ---
+                    
+                    # Mandante
                     time_a = dic_times.get(id_mandante, {})
                     nome_a = time_a.get('nome', f'Time {id_mandante}')
                     escudo_a = time_a.get('url_escudo_png', '')
                     slug_a = time_a.get('slug', id_mandante)
                     pontos_a = float(jogo.get('time_mandante_pontuacao') or 0.0)
 
+                    # Visitante
                     time_b = dic_times.get(id_visitante, {})
                     nome_b = time_b.get('nome', f'Time {id_visitante}')
                     escudo_b = time_b.get('url_escudo_png', '')
                     slug_b = time_b.get('slug', id_visitante)
                     pontos_b = float(jogo.get('time_visitante_pontuacao') or 0.0)
                     
-                    # Define quem venceu pelo slug
+                    # Define Vencedor (Slug)
                     slug_vencedor = None
-                    if id_vencedor == id_mandante: slug_vencedor = slug_a
-                    elif id_vencedor == id_visitante: slug_vencedor = slug_b
+                    if id_vencedor == id_mandante: slug_vencedor = str(slug_a)
+                    elif id_vencedor == id_visitante: slug_vencedor = str(slug_b)
 
                     item = {
                         'nome_copa': nome_visual,
@@ -172,12 +174,12 @@ def coletar_dados_copa():
                         'time_b_escudo': escudo_b,
                         'time_b_pontos': pontos_b,
                         
-                        'vencedor': str(slug_vencedor) if slug_vencedor else None,
+                        'vencedor': slug_vencedor,
                         'data_coleta': ts_agora
                     }
                     lista_final.append(item)
                 except Exception as e:
-                    print(f"      ⚠️ Erro ao processar jogo individual: {e}")
+                    print(f"      ⚠️ Erro ao processar jogo: {e}")
 
             if lista_final:
                 df = pd.DataFrame(lista_final)
@@ -204,14 +206,14 @@ def coletar_dados_copa():
                 )
                 try:
                     client.load_table_from_dataframe(df, TAB_COPA, job_config=job_config).result()
-                    print(f"      ✅ SUCESSO! {len(df)} jogos da copa salvos.")
+                    print(f"      ✅ SUCESSO! {len(df)} jogos salvos no BigQuery.")
                 except Exception as e:
-                    print(f"      ❌ Erro ao salvar no BigQuery: {e}")
+                    print(f"      ❌ Erro BQ: {e}")
             else:
-                print("      ⚠️ Nenhum jogo foi extraído com sucesso.")
+                print("      ⚠️ Nenhum jogo processado.")
 
         except Exception as e:
-            print(f"      ❌ Erro fatal na requisição: {e}")
+            print(f"      ❌ Erro fatal: {e}")
 
 if __name__ == "__main__":
     coletar_dados_copa()
