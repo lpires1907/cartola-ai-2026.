@@ -12,7 +12,7 @@ ARQUIVO_CONFIG = "copas.json"
 DATASET_ID = "cartola_analytics"
 TAB_COPA = f"{DATASET_ID}.copa_mata_mata"
 
-# Mapa de Fases (Traduz os códigos do Cartola para nomes reais)
+# Mapa de Fases
 MAPA_FASES = {
     "1": "32-avos de Final",
     "2": "16-avos de Final",
@@ -54,7 +54,6 @@ def carregar_configuracao():
 
 def limpar_dados_da_copa(client, slug):
     try:
-        # nosec: slug vem de config interna confiável
         query = f"DELETE FROM `{client.project}.{TAB_COPA}` WHERE liga_slug = '{slug}'" # nosec
         client.query(query).result()
         print(f"🧹 Dados antigos removidos para '{slug}'.")
@@ -93,67 +92,64 @@ def coletar_dados_copa():
         url = f"https://api.cartola.globo.com/auth/liga/{slug}"
         
         try:
-            # FIX DE SEGURANÇA: timeout=30 para passar no Bandit
             resp = requests.get(url, headers=headers, timeout=30)
-            
             if resp.status_code != 200:
                 print(f"      ❌ Erro API: {resp.status_code}")
                 continue
 
             dados = resp.json()
             rodada_atual = dados['liga'].get('rodada_atual', 0)
-            
-            # --- LÓGICA DE CRUZAMENTO DE DADOS ---
-            
-            # 1. Pega o Dicionário de Times (onde estão nomes e escudos)
-            # O ID do time é a chave deste dicionário
             dic_times = dados.get('times', {})
-            
-            # 2. Pega os Confrontos (onde estão os IDs e pontuações)
             raw_chaves = dados.get('chaves_mata_mata', {})
             
+            # --- CORREÇÃO DO ERRO 'LIST HAS NO ATTRIBUTE GET' ---
             todos_jogos = []
             
-            # O JSON vem como {"1": [jogos], "2": [jogos]} ou direto como lista
+            # 1. Padroniza a entrada para uma lista genérica
             if isinstance(raw_chaves, dict):
-                for key_rodada, lista in raw_chaves.items():
-                    if isinstance(lista, list):
-                        todos_jogos.extend(lista)
+                iteravel = raw_chaves.values() # Ex: [[jogo1], [jogo2]]
             elif isinstance(raw_chaves, list):
-                todos_jogos = raw_chaves
+                iteravel = raw_chaves          # Ex: [[jogo1], [jogo2]] ou [jogo1, jogo2]
+            else:
+                iteravel = []
+
+            # 2. Achata a estrutura (Flatten)
+            # Isso garante que teremos uma lista simples de jogos no final
+            for item in iteravel:
+                if isinstance(item, list):
+                    todos_jogos.extend(item)  # Se for lista de jogos, adiciona todos
+                elif isinstance(item, dict):
+                    todos_jogos.append(item)  # Se já for o jogo, adiciona
 
             print(f"      🔎 Encontrados {len(todos_jogos)} jogos para processar.")
 
             lista_final = []
-            
             for jogo in todos_jogos:
                 try:
-                    # Extrai IDs e Pontos usando as chaves corretas do Cartola
+                    # Proteção extra: ignora se por acaso vier algo que não é dicionário
+                    if not isinstance(jogo, dict):
+                        continue
+
                     id_mandante = str(jogo.get('time_mandante_id'))
                     id_visitante = str(jogo.get('time_visitante_id'))
                     id_vencedor = str(jogo.get('vencedor_id'))
                     
-                    # Identifica a Fase (Ex: "O" -> "Oitavas de Final")
                     sigla_fase = jogo.get('tipo_fase', str(jogo.get('rodada_id', 'Fase Única')))
                     nome_fase = MAPA_FASES.get(sigla_fase, f"Rodada {sigla_fase}")
 
-                    # --- CRUZAMENTO: Busca detalhes no dicionário 'times' ---
-                    
-                    # Mandante
+                    # Cruzamento
                     time_a = dic_times.get(id_mandante, {})
                     nome_a = time_a.get('nome', f'Time {id_mandante}')
                     escudo_a = time_a.get('url_escudo_png', '')
                     slug_a = time_a.get('slug', id_mandante)
                     pontos_a = float(jogo.get('time_mandante_pontuacao') or 0.0)
 
-                    # Visitante
                     time_b = dic_times.get(id_visitante, {})
                     nome_b = time_b.get('nome', f'Time {id_visitante}')
                     escudo_b = time_b.get('url_escudo_png', '')
                     slug_b = time_b.get('slug', id_visitante)
                     pontos_b = float(jogo.get('time_visitante_pontuacao') or 0.0)
                     
-                    # Define Vencedor (Slug)
                     slug_vencedor = None
                     if id_vencedor == id_mandante: slug_vencedor = str(slug_a)
                     elif id_vencedor == id_visitante: slug_vencedor = str(slug_b)
@@ -163,23 +159,20 @@ def coletar_dados_copa():
                         'liga_slug': slug,
                         'rodada_real': rodada_atual,
                         'fase_copa': nome_fase,
-                        
                         'time_a_nome': nome_a,
                         'time_a_slug': str(slug_a),
                         'time_a_escudo': escudo_a,
                         'time_a_pontos': pontos_a,
-                        
                         'time_b_nome': nome_b,
                         'time_b_slug': str(slug_b),
                         'time_b_escudo': escudo_b,
                         'time_b_pontos': pontos_b,
-                        
                         'vencedor': slug_vencedor,
                         'data_coleta': ts_agora
                     }
                     lista_final.append(item)
                 except Exception as e:
-                    print(f"      ⚠️ Erro ao processar jogo: {e}")
+                    print(f"      ⚠️ Erro ao processar jogo individual: {e}")
 
             if lista_final:
                 df = pd.DataFrame(lista_final)
