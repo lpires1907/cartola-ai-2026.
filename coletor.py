@@ -30,10 +30,13 @@ def get_bq_client():
     info = json.loads(GCP_JSON) if isinstance(GCP_JSON, str) else GCP_JSON
     return bigquery.Client(credentials=service_account.Credentials.from_service_account_info(info), project=info['project_id'])
 
-def limpar_dados_rodada(client, rodada):
-    print(f"🧹 Limpando dados da Rodada {rodada} (Parciais e Oficiais)...")
+def limpar_dados_rodada_e_futuro(client, rodada_alvo):
+    """Apaga a rodada alvo e qualquer rodada futura (limpeza de fantasmas)."""
+    print(f"🧹 Limpando dados da Rodada {rodada_alvo} e possíveis fantasmas futuros...")
     for t in [TAB_HISTORICO, TAB_ESCALACOES]:
-        client.query(f"DELETE FROM `{client.project}.{t}` WHERE rodada = {rodada}").result() # nosec B608
+        # Deleta a rodada atual E qualquer rodada maior que ela que tenha sido criada por erro
+        query = f"DELETE FROM `{client.project}.{t}` WHERE rodada >= {rodada_alvo}"
+        client.query(query).result() # nosec B608
 
 def rodar_coleta():
     client = get_bq_client()
@@ -42,18 +45,15 @@ def rodar_coleta():
     r_atual = st.get('rodada_atual', 0)
     status_mercado = st.get('status_mercado') # 1: Aberto, 2: Fechado/Live
     
-    # LÓGICA DE TRANSIÇÃO BLINDADA
-    if status_mercado == 1: # Mercado Aberto
-        # Se aberto, queremos salvar o que FECHOU (Rodada anterior)
+    # LÓGICA DE DECISÃO DE RODADA
+    if status_mercado == 1: # Mercado Aberto (Momento de fechar a rodada que passou)
         r_alvo = r_atual - 1
         tipo_dado = "OFICIAL"
-        is_live = False
-    else: # Mercado Fechado / Rodada em andamento
+    else: # Mercado Fechado / Live (Rodada em andamento)
         r_alvo = r_atual
         tipo_dado = "PARCIAL"
-        is_live = True
 
-    print(f"🎯 Alvo: Rodada {r_alvo} como {tipo_dado}")
+    print(f"🎯 Iniciando coleta: Rodada {r_alvo} ({tipo_dado})")
 
     res_liga = requests.get(f"https://api.cartola.globo.com/auth/liga/{LIGA_SLUG}", headers=get_pro_headers(), timeout=TIMEOUT).json()
     ts = datetime.now(pytz.timezone('America/Sao_Paulo'))
@@ -61,26 +61,27 @@ def rodar_coleta():
 
     for t_obj in res_liga.get('times', []):
         tid = t_obj['time_id']
-        res_t = requests.get(f"https://api.cartola.globo.com/time/id/{tid}", headers=get_public_headers(), timeout=TIMEOUT).json()
         
-        info_t = res_t.get('time', {})
-        v_nome_cartola = info_t.get('nome_cartola') or t_obj.get('nome_cartola') or "Sem Nome"
-        v_patrimonio = float(res_t.get('patrimonio') or info_t.get('patrimonio') or 0.0)
-
-        # Se for OFICIAL e a rodada alvo for a que passou, pegamos o ponto fechado
+        # OFICIAL: Busca no endpoint de histórico travado
         if tipo_dado == "OFICIAL":
-            # Busca especificamente o histórico da rodada que fechou
-            hist_res = requests.get(f"https://api.cartola.globo.com/time/id/{tid}/{r_alvo}", headers=get_public_headers(), timeout=TIMEOUT).json()
-            pts = float(hist_res.get('pontos', 0.0))
-            atletas = hist_res.get('atletas', [])
+            url = f"https://api.cartola.globo.com/time/id/{tid}/{r_alvo}"
+            res_t = requests.get(url, headers=get_public_headers(), timeout=TIMEOUT).json()
+            pts = float(res_t.get('pontos', 0.0))
+            atletas = res_t.get('atletas', [])
+            patrimonio = float(res_t.get('patrimonio', 0.0))
         else:
-            # Se parcial, usa o ponto do objeto de liga (ou cálculo se preferir)
+            # PARCIAL: Busca escalação atual
+            url = f"https://api.cartola.globo.com/time/id/{tid}"
+            res_t = requests.get(url, headers=get_public_headers(), timeout=TIMEOUT).json()
             pts = float(t_obj.get('pontos', {}).get('rodada', 0.0))
             atletas = res_t.get('atletas', [])
+            patrimonio = float(res_t.get('patrimonio', 0.0))
+
+        v_nome_cartola = res_t.get('time', {}).get('nome_cartola') or t_obj.get('nome_cartola') or "Sem Nome"
 
         l_h.append({
             'nome': t_obj['nome'], 'nome_cartola': v_nome_cartola, 'pontos': pts, 
-            'patrimonio': v_patrimonio, 'rodada': r_alvo, 'timestamp': ts, 'tipo_dado': tipo_dado
+            'patrimonio': patrimonio, 'rodada': r_alvo, 'timestamp': ts, 'tipo_dado': tipo_dado
         })
         
         for a in atletas:
@@ -94,10 +95,11 @@ def rodar_coleta():
         time.sleep(0.1)
 
     if l_h:
-        limpar_dados_rodada(client, r_alvo) # Apaga o PARCIAL antes de inserir o OFICIAL
+        # Limpa o passado e o futuro indevido antes de salvar
+        limpar_dados_rodada_e_futuro(client, r_alvo)
         client.load_table_from_dataframe(pd.DataFrame(l_h), f"{client.project}.{TAB_HISTORICO}").result()
         client.load_table_from_dataframe(pd.DataFrame(l_e), f"{client.project}.{TAB_ESCALACOES}").result()
-        print(f"✅ Sincronização concluída!")
+        print(f"✅ Sucesso: Rodada {r_alvo} salva como {tipo_dado}!")
 
 if __name__ == "__main__":
     rodar_coleta()
