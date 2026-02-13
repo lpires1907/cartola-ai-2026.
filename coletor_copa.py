@@ -25,7 +25,6 @@ MAPA_FASES = {
 def get_bq_client():
     if os.path.exists("credentials.json"):
         return bigquery.Client.from_service_account_json("credentials.json")
-    
     if os.getenv('GCP_SERVICE_ACCOUNT'):
         try:
             info = json.loads(os.getenv('GCP_SERVICE_ACCOUNT'))
