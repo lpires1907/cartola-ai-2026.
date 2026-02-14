@@ -12,7 +12,7 @@ st.set_page_config(page_title="Liga SAS Brasil 2026", page_icon="⚽", layout="w
 
 def get_bq_client():
     creds, project_id = None, None
-    # 1. Secrets (Cloud)
+    # 1. Secrets (Cloud) - Tenta formato JSON string ou Dict TOML
     if "GCP_SERVICE_ACCOUNT" in st.secrets:
         try:
             val = st.secrets["GCP_SERVICE_ACCOUNT"]
@@ -20,14 +20,14 @@ def get_bq_client():
             creds = service_account.Credentials.from_service_account_info(info)
             project_id = info['project_id']
         except: pass
-    # 2. Env Var (Local/Docker)
+    # 2. Env Var (Local)
     elif os.getenv('GCP_SERVICE_ACCOUNT'):
         try:
             info = json.loads(os.getenv('GCP_SERVICE_ACCOUNT'))
             creds = service_account.Credentials.from_service_account_info(info)
             project_id = info['project_id']
         except: pass
-    # 3. Arquivo Local
+    # 3. Arquivo
     elif os.path.exists("credentials.json"):
         return bigquery.Client.from_service_account_json("credentials.json")
     
@@ -49,7 +49,7 @@ def get_dados_temporais():
         11: ("pontos_nov_dez", "Nov/Dez"), 12: ("pontos_nov_dez", "Nov/Dez")
     }
     col_mes, nome_mes = mapa_mes.get(mes, ("pontos_jan_fev", "Início"))
-    col_turno = "pontos_turno_1" # Lógica simplificada para o T1
+    col_turno = "pontos_turno_1" # Padrão T1
     nome_turno = "1º Turno"
     return col_mes, nome_mes, col_turno, nome_turno
 
@@ -58,7 +58,7 @@ def load_data(query):
     if not client: return pd.DataFrame()
     try:
         df = client.query(query).to_dataframe()
-        # BLINDAGEM CONTRA TYPE ERROR: Converte colunas numéricas forçadamente
+        # BLINDAGEM DE TIPOS: Converte tudo para float para evitar erro de subtração
         cols_num = ['total_geral', 'pontos', 'media', 'maior_pontuacao', 'menor_pontuacao', 'patrimonio_atual']
         for col in df.columns:
             if col in cols_num or col.startswith('pontos_'):
@@ -70,12 +70,9 @@ def load_data(query):
 st.title("🏆 Liga SAS Brasil 2026")
 tab1, tab2, tab3 = st.tabs(["⚽ Painel Principal", "🏆 Mata-Mata", "📋 Escalações"])
 
-# ==============================================================================
-# ABA 1: PAINEL GERAL
-# ==============================================================================
 with tab1:
     if client:
-        # --- 1. NARRADOR DA RODADA (Topo) ---
+        # 1. NARRADOR RODADA (Topo)
         df_narrador = load_data(f"SELECT texto, tipo FROM `{client.project}.{DATASET_ID}.comentarios_ia` ORDER BY data DESC LIMIT 5") # nosec B608
         narr_rodada = df_narrador[df_narrador['tipo'] == 'RODADA'].head(1)
         narr_geral = df_narrador[df_narrador['tipo'] == 'GERAL'].head(1)
@@ -85,7 +82,7 @@ with tab1:
 
         st.divider()
 
-        # --- CARGA DE DADOS ---
+        # 2. CARGA DE DADOS
         df_view = load_data(f"SELECT * FROM `{client.project}.{DATASET_ID}.view_consolidada_times`") # nosec B608
         q_last = f"""
         SELECT h.nome, h.pontos, h.rodada, h.tipo_dado 
@@ -98,14 +95,13 @@ with tab1:
         if not df_view.empty and not df_rodada.empty:
             col_mes, nome_mes, col_turno, nome_turno = get_dados_temporais()
             
-            # --- ORDENAÇÕES SEGURAS ---
+            # ORDENAÇÕES
             top_geral = df_view.sort_values('total_geral', ascending=False)
             top_turno = df_view.sort_values(col_turno, ascending=False)
             top_mes = df_view.sort_values(col_mes, ascending=False) if col_mes in df_view.columns else pd.DataFrame()
             
-            # KPI Mitada/Zicada/Rico
+            # KPIs EXTRAS
             mitada = df_view.sort_values('maior_pontuacao', ascending=False).iloc[0]
-            # Zicada > 0
             df_zica = df_view[df_view['menor_pontuacao'] > 0.1].sort_values('menor_pontuacao', ascending=True)
             zicada = df_zica.iloc[0] if not df_zica.empty else df_view.iloc[0]
             rico = df_view.sort_values('patrimonio_atual', ascending=False).iloc[0]
@@ -120,8 +116,9 @@ with tab1:
                 c1.metric("Líder", lg['nome'], f"{lg['total_geral']:.2f}")
                 if len(top_geral) > 1:
                     vg = top_geral.iloc[1]
-                    diff_g = vg['total_geral'] - lg['total_geral']
-                    c1.metric("Vice", vg['nome'], f"{vg['total_geral']:.2f}", delta=f"{diff_g:.2f}")
+                    diff = vg['total_geral'] - lg['total_geral']
+                    # CORREÇÃO: Passando argumentos explicitamente
+                    c1.metric(f"🥈 Vice: {vg['nome']}", f"{vg['total_geral']:.2f}", delta=f"{diff:.2f}")
 
             # TURNO
             if len(top_turno) > 0:
@@ -131,7 +128,7 @@ with tab1:
                 if len(top_turno) > 1:
                     vt = top_turno.iloc[1]
                     diff_t = vt[col_turno] - lt[col_turno]
-                    c2.metric("Vice", vt['nome'], f"{vt[col_turno]:.2f}", delta=f"{diff_t:.2f}")
+                    c2.metric(f"Vice: {vt['nome']}", f"{vt[col_turno]:.2f}", delta=f"{diff_t:.2f}")
 
             # MÊS
             if not top_mes.empty and len(top_mes) > 0:
@@ -141,32 +138,31 @@ with tab1:
                 if len(top_mes) > 1:
                     vm = top_mes.iloc[1]
                     diff_m = vm[col_mes] - lm[col_mes]
-                    c3.metric("Vice", vm['nome'], f"{vm[col_mes]:.2f}", delta=f"{diff_m:.2f}")
+                    c3.metric(f"Vice: {vm['nome']}", f"{vm[col_mes]:.2f}", delta=f"{diff_m:.2f}")
             else:
                 c3.markdown(f"### 📅 {nome_mes}")
                 c3.info("Início de mês.")
             
             st.divider()
 
-            # --- LINHA 2: DESTAQUES ---
+            # --- LINHA 2: MITADAS & GRANA ---
             k1, k2, k3, k4 = st.columns(4)
             
             # Rodada
-            if not df_rodada.empty:
-                lr = df_rodada.iloc[0]
-                status_r = "(Ao Vivo)" if lr['tipo_dado'] == 'PARCIAL' else "(Fechada)"
-                k1.metric(f"⚽ Mito R{lr['rodada']} {status_r}", lr['nome'], f"{lr['pontos']:.2f}")
-                if len(df_rodada) > 1:
-                    vr = df_rodada.iloc[1]
-                    k1.caption(f"Vice: {vr['nome']} ({vr['pontos']:.2f})")
+            lr = df_rodada.iloc[0]
+            status_r = "(Ao Vivo)" if lr['tipo_dado'] == 'PARCIAL' else "(Fechada)"
+            k1.metric(f"⚽ Mito R{lr['rodada']} {status_r}", lr['nome'], f"{lr['pontos']:.2f}")
+            if len(df_rodada) > 1:
+                vr = df_rodada.iloc[1]
+                k1.caption(f"Vice: {vr['nome']} ({vr['pontos']:.2f})")
 
             k2.metric("🚀 Maior Mitada", mitada['nome'], f"{mitada['maior_pontuacao']:.2f}")
             k3.metric("📉 Maior Zicada", zicada['nome'], f"{zicada['menor_pontuacao']:.2f}")
             k4.metric("💰 O Mais Rico", rico['nome'], f"C$ {rico['patrimonio_atual']:.2f}")
 
-            # --- NARRADOR GERAL (Abaixo dos KPIs) ---
-            st.write("")
+            # NARRADOR GERAL (Embaixo)
             if not narr_geral.empty:
+                st.write("")
                 st.warning(f"🎙️ **Resenha do Campeonato:** {narr_geral.iloc[0]['texto']}")
 
             st.divider()
@@ -177,8 +173,7 @@ with tab1:
                 return alt.Chart(df.head(5)).mark_bar().encode(
                     x=alt.X(x_col, title='Pontos'),
                     y=alt.Y('nome', sort='-x', title=None),
-                    color=alt.value(color),
-                    tooltip=['nome', x_col]
+                    color=alt.value(color), tooltip=['nome', x_col]
                 ).properties(title=title)
 
             with g1: st.altair_chart(plot_chart(top_geral, 'total_geral', "Top 5 Geral", "#f9c74f"), use_container_width=True)
@@ -187,20 +182,15 @@ with tab1:
                 if not top_mes.empty: st.altair_chart(plot_chart(top_mes, col_mes, f"Top 5 {nome_mes}", "#577590"), use_container_width=True)
 
             # --- TABELA GERAL ---
-            with st.expander("📊 Ver Classificação Completa", expanded=True):
-                # Colunas dinâmicas para evitar erro se mês não existir
-                cols_possiveis = ['nome', 'nome_cartola', 'total_geral', col_turno, col_mes, 'media', 'maior_pontuacao', 'patrimonio_atual']
-                cols_validas = [c for c in cols_possiveis if c in df_view.columns]
-                
-                # Renomeia
+            with st.expander("📊 Tabela Completa (Expandir)", expanded=True):
+                cols_r = ['nome', 'nome_cartola', 'total_geral', col_turno, col_mes, 'media', 'maior_pontuacao', 'patrimonio_atual']
+                # Filtra colunas existentes
+                cols_v = [c for c in cols_r if c in df_view.columns]
                 ren = {'total_geral': 'Total', col_turno: nome_turno, col_mes: nome_mes, 'media': 'Média', 'maior_pontuacao': 'Recorde', 'patrimonio_atual': 'C$'}
-                st.dataframe(df_view[cols_validas].rename(columns=ren).style.format(precision=2), use_container_width=True)
+                st.dataframe(df_view[cols_v].rename(columns=ren).style.format(precision=2), use_container_width=True)
         else:
             st.warning("Aguardando dados... Rode o coletor.")
 
-# ==============================================================================
-# ABA 2: MATA-MATA
-# ==============================================================================
 with tab2:
     st.header("🏆 Mata-Mata")
     if client:
@@ -220,9 +210,6 @@ with tab2:
                         c3.markdown(f"<div style='text-align:left'>{bb}{j['time_b_nome']}{bb}</div>", unsafe_allow_html=True)
         else: st.info("Sem dados de Copa.")
 
-# ==============================================================================
-# ABA 3: ESCALAÇÕES
-# ==============================================================================
 with tab3:
     st.header("📋 Escalações")
     if client:
