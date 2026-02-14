@@ -16,88 +16,57 @@ TAB_ESCALACOES = f"{DATASET_ID}.times_escalacoes"
 
 GCP_JSON = os.getenv('GCP_SERVICE_ACCOUNT')
 TOKEN_SECRET = os.getenv('CARTOLA_GLBID') 
-TIMEOUT = 30 
-
-def get_pro_headers():
-    if not TOKEN_SECRET: return None
-    t = TOKEN_SECRET.replace("Bearer ", "").strip().strip('"').strip("'")
-    return {'authority': 'api.cartola.globo.com', 'authorization': f'Bearer {t}', 'x-glb-app': 'cartola_web', 'x-glb-auth': 'oidc', 'user-agent': 'Mozilla/5.0'}
-
-def get_public_headers():
-    return {'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json'}
 
 def get_bq_client():
+    if not GCP_JSON: return None
     info = json.loads(GCP_JSON) if isinstance(GCP_JSON, str) else GCP_JSON
-    return bigquery.Client(credentials=service_account.Credentials.from_service_account_info(info), project=info['project_id'])
+    creds = service_account.Credentials.from_service_account_info(info)
+    return bigquery.Client(credentials=creds, project=info['project_id'])
 
 def limpar_dados_rodada_e_futuro(client, rodada_alvo):
-    """Apaga a rodada alvo e qualquer rodada futura (limpeza de fantasmas)."""
-    print(f"🧹 Limpando dados da Rodada {rodada_alvo} e possíveis fantasmas futuros...")
+    print(f"🧹 Limpando dados da Rodada {rodada_alvo} e fantasmas...")
     for t in [TAB_HISTORICO, TAB_ESCALACOES]:
-        # O # nosec B608 deve estar no final da linha que contém a string da query para o Bandit
         query = f"DELETE FROM `{client.project}.{t}` WHERE rodada >= {rodada_alvo}" # nosec B608
         client.query(query).result()
 
 def rodar_coleta():
     client = get_bq_client()
-    st = requests.get("https://api.cartola.globo.com/mercado/status", headers=get_public_headers(), timeout=TIMEOUT).json()
+    if not client: return
+    
+    headers_pub = {'User-Agent': 'Mozilla/5.0'}
+    st = requests.get("https://api.cartola.globo.com/mercado/status", headers=headers_pub, timeout=30).json()
     
     r_atual = st.get('rodada_atual', 0)
-    status_mercado = st.get('status_mercado') # 1: Aberto, 2: Fechado/Live
+    # Se mercado está aberto (1), consolidamos a rodada que passou
+    r_alvo = (r_atual - 1) if st.get('status_mercado') == 1 else r_atual
+    tipo = "OFICIAL" if st.get('status_mercado') == 1 else "PARCIAL"
+
+    token = TOKEN_SECRET.replace("Bearer ", "").strip() if TOKEN_SECRET else ""
+    h_pro = {'Authorization': f'Bearer {token}', 'User-Agent': 'Mozilla/5.0'}
     
-    # LÓGICA DE TRANSIÇÃO
-    if status_mercado == 1:
-        r_alvo = r_atual - 1
-        tipo_dado = "OFICIAL"
-    else:
-        r_alvo = r_atual
-        tipo_dado = "PARCIAL"
-
-    print(f"🎯 Alvo: Rodada {r_alvo} ({tipo_dado}) na liga {LIGA_SLUG}")
-
-    res_liga = requests.get(f"https://api.cartola.globo.com/auth/liga/{LIGA_SLUG}", headers=get_pro_headers(), timeout=TIMEOUT).json()
+    res_liga = requests.get(f"https://api.cartola.globo.com/auth/liga/{LIGA_SLUG}", headers=h_pro, timeout=30).json()
     ts = datetime.now(pytz.timezone('America/Sao_Paulo'))
-    l_h, l_e = [], []
+    l_h = []
 
     for t_obj in res_liga.get('times', []):
         tid = t_obj['time_id']
+        # Busca detalhes para garantir patrimonio e nome_cartola
+        url = f"https://api.cartola.globo.com/time/id/{tid}" + (f"/{r_alvo}" if tipo == "OFICIAL" else "")
+        d = requests.get(url, headers=headers_pub, timeout=30).json()
         
-        if tipo_dado == "OFICIAL":
-            # Busca no histórico oficial para evitar resíduos de rodadas futuras
-            url = f"https://api.cartola.globo.com/time/id/{tid}/{r_alvo}"
-            res_t = requests.get(url, headers=get_public_headers(), timeout=TIMEOUT).json()
-            pts = float(res_t.get('pontos', 0.0))
-            atletas = res_t.get('atletas', [])
-            patrimonio = float(res_t.get('patrimonio', 0.0))
-        else:
-            url = f"https://api.cartola.globo.com/time/id/{tid}"
-            res_t = requests.get(url, headers=get_public_headers(), timeout=TIMEOUT).json()
-            pts = float(t_obj.get('pontos', {}).get('rodada', 0.0))
-            atletas = res_t.get('atletas', [])
-            patrimonio = float(res_t.get('patrimonio', 0.0))
-
-        v_nome_cartola = res_t.get('time', {}).get('nome_cartola') or t_obj.get('nome_cartola') or "Sem Nome"
-
+        pts = float(d.get('pontos', 0.0)) if tipo == "OFICIAL" else float(t_obj.get('pontos', {}).get('rodada', 0.0))
+        
         l_h.append({
-            'nome': t_obj['nome'], 'nome_cartola': v_nome_cartola, 'pontos': pts, 
-            'patrimonio': patrimonio, 'rodada': r_alvo, 'timestamp': ts, 'tipo_dado': tipo_dado
+            'nome': t_obj['nome'], 'nome_cartola': d.get('time', {}).get('nome_cartola', 'Sem Nome'),
+            'pontos': pts, 'patrimonio': float(d.get('patrimonio', 0.0)),
+            'rodada': r_alvo, 'timestamp': ts, 'tipo_dado': tipo
         })
-        
-        for a in atletas:
-            l_e.append({
-                'rodada': r_alvo, 'liga_time_nome': t_obj['nome'], 
-                'atleta_apelido': a.get('apelido'), 
-                'pontos': float(a.get('pontos_num', 0.0)), 
-                'is_capitao': bool(a.get('atleta_id') == res_t.get('capitao_id')),
-                'timestamp': ts
-            })
         time.sleep(0.1)
 
     if l_h:
         limpar_dados_rodada_e_futuro(client, r_alvo)
         client.load_table_from_dataframe(pd.DataFrame(l_h), f"{client.project}.{TAB_HISTORICO}").result()
-        client.load_table_from_dataframe(pd.DataFrame(l_e), f"{client.project}.{TAB_ESCALACOES}").result()
-        print(f"✅ Sincronização concluída!")
+        print(f"✅ Rodada {r_alvo} ({tipo}) sincronizada.")
 
 if __name__ == "__main__":
     rodar_coleta()
