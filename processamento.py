@@ -6,7 +6,7 @@ def recriar_view_consolidada(client, dataset_id):
     view_id = f"{client.project}.{dataset_id}.view_consolidada_times"
     tab_historico = f"{client.project}.{dataset_id}.historico"
     
-    print(f"🔨 (Re)Construindo View Completa: {view_id}")
+    print(f"🔨 Atualizando View: {view_id}")
 
     query = f"""
     CREATE OR REPLACE VIEW `{view_id}` AS
@@ -25,7 +25,7 @@ def recriar_view_consolidada(client, dataset_id):
         SUM(pontos) as total_geral,
         AVG(pontos) as media,
         MAX(pontos) as maior_pontuacao,
-        -- Zicada: Mínimo acima de zero
+        -- Zicada: Menor pontuação positiva (ignora zeros)
         MIN(CASE WHEN pontos > 0 THEN pontos ELSE NULL END) as menor_pontuacao,
         COUNT(DISTINCT rodada) as rodadas_jogadas,
         MAX(patrimonio) as patrimonio_atual,
@@ -34,7 +34,7 @@ def recriar_view_consolidada(client, dataset_id):
         SUM(CASE WHEN rodada <= 19 THEN pontos ELSE 0 END) as pontos_turno_1,
         SUM(CASE WHEN rodada > 19 THEN pontos ELSE 0 END) as pontos_turno_2,
         
-        -- Meses (Jan-Dez)
+        -- Meses
         SUM(CASE WHEN rodada BETWEEN 1 AND 8 THEN pontos ELSE 0 END) as pontos_jan_fev,
         SUM(CASE WHEN rodada BETWEEN 9 AND 12 THEN pontos ELSE 0 END) as pontos_marco,
         SUM(CASE WHEN rodada BETWEEN 13 AND 16 THEN pontos ELSE 0 END) as pontos_abril,
@@ -54,10 +54,10 @@ def recriar_view_consolidada(client, dataset_id):
         client.query(query).result()
         print("✅ View Consolidada atualizada!")
     except Exception as e:
-        print(f"❌ Erro View: {e}")
+        print(f"❌ Erro na View: {e}")
 
 def atualizar_campeoes_mensais(client, dataset_id):
-    pass
+    pass 
 
 if __name__ == "__main__":
     pass
