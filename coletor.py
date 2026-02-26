@@ -8,6 +8,9 @@ from datetime import datetime
 import pytz
 import time
 
+# Importa o novo módulo utilitário
+import cartola_utils 
+
 LIGA_SLUG = "sas-brasil-2026"
 DATASET_ID = "cartola_analytics"
 TAB_HISTORICO = f"{DATASET_ID}.historico"
@@ -29,13 +32,6 @@ def limpar_dados_rodada_e_futuro(client, rodada_alvo):
         query = f"DELETE FROM `{client.project}.{t}` WHERE rodada >= {rodada_alvo}" # nosec B608
         client.query(query).result()
 
-def buscar_parciais_globais(headers):
-    """Busca as pontuações ao vivo de todos os jogadores."""
-    try:
-        res = requests.get("https://api.cartola.globo.com/atletas/pontuados", headers=headers, timeout=30).json()
-        return {int(id_str): info.get('pontuacao', 0.0) for id_str, info in res.get('atletas', {}).items()}
-    except: return {}
-
 def rodar_coleta():
     client = get_bq_client()
     if not client: return
@@ -43,7 +39,6 @@ def rodar_coleta():
     headers_pub = {'User-Agent': 'Mozilla/5.0'}
     st = requests.get("https://api.cartola.globo.com/mercado/status", headers=headers_pub, timeout=30).json()
     
-    # Lógica de Mercado Aberto = Rodada Passada Oficial
     r_alvo = (st.get('rodada_atual') - 1) if st.get('status_mercado') == 1 else st.get('rodada_atual')
     tipo_dado = "OFICIAL" if st.get('status_mercado') == 1 else "PARCIAL"
 
@@ -56,59 +51,65 @@ def rodar_coleta():
     l_h, l_e = [], []
     pos_map = {'1': 'Goleiro', '2': 'Lateral', '3': 'Zagueiro', '4': 'Meia', '5': 'Atacante', '6': 'Técnico'}
 
-    # 1. Pré-carrega as parciais se o mercado estiver fechado (jogos rolando)
+    # Centraliza o download dos metadados globais se for PARCIAL
     mapa_parciais = {}
+    mapa_status = {}
     if tipo_dado == "PARCIAL":
-        mapa_parciais = buscar_parciais_globais(headers_pub)
+        mapa_parciais = cartola_utils.buscar_parciais_globais(headers_pub)
+        mapa_status = cartola_utils.buscar_status_partidas(headers_pub)
 
     for t_obj in res_liga.get('times', []):
         tid = t_obj['time_id']
-        url = f"https://api.cartola.globo.com/time/id/{tid}/{r_alvo}" if tipo_dado == "OFICIAL" else f"https://api.cartola.globo.com/time/id/{tid}"
-        d = requests.get(url, headers=headers_pub, timeout=30).json()
         
-        capitao_id = d.get('capitao_id')
-
-        # 2. Lógica corrigida para calcular Pontos da Equipe
-        pts_equipe = 0.0
         if tipo_dado == "OFICIAL":
+            # Pega o histórico congelado direto da API oficial
+            d = requests.get(f"https://api.cartola.globo.com/time/id/{tid}/{r_alvo}", headers=headers_pub, timeout=30).json()
             pts_equipe = float(d.get('pontos', 0.0))
-        else:
-            # Soma manual usando os dados ao vivo do endpoint de pontuados
-            for a in d.get('atletas', []):
-                atleta_id = a.get('atleta_id')
-                pts_atleta = mapa_parciais.get(atleta_id, 0.0)
-                if atleta_id == capitao_id:
-                    pts_atleta *= 1.5
-                pts_equipe += pts_atleta
-            pts_equipe = round(pts_equipe, 2)
+            patrimonio = float(d.get('patrimonio', 0.0))
+            nome_cartola = d.get('time', {}).get('nome_cartola', 'Sem Nome')
             
+            # Formata escalação para o BD
+            escalacao_final = []
+            for a in d.get('atletas', []):
+                is_cap = (a.get('atleta_id') == d.get('capitao_id'))
+                escalacao_final.append({
+                    'apelido': a.get('apelido'), 
+                    'pos': a.get('posicao_id'), 
+                    'pts': float(a.get('pontos_num', 0.0)), 
+                    'cap': is_cap
+                })
+        else:
+            # Processamento inteligente via utils (já com substituições aplicadas)
+            d_base = requests.get(f"https://api.cartola.globo.com/time/id/{tid}", headers=headers_pub, timeout=30).json()
+            patrimonio = float(d_base.get('patrimonio', 0.0))
+            nome_cartola = d_base.get('time', {}).get('nome_cartola', 'Sem Nome')
+            
+            pts_equipe, escalacao_final = cartola_utils.calcular_parciais_equipe(tid, mapa_parciais, mapa_status, headers_pub)
+
+        # 1. Salva Histórico da Equipe
         l_h.append({
             'nome': t_obj['nome'], 
-            'nome_cartola': d.get('time', {}).get('nome_cartola', 'Sem Nome'),
+            'nome_cartola': nome_cartola,
             'pontos': pts_equipe, 
-            'patrimonio': float(d.get('patrimonio', 0.0)),
+            'patrimonio': patrimonio,
             'rodada': r_alvo, 
             'timestamp': ts, 
             'tipo_dado': tipo_dado
         })
         
-        # 3. Lógica corrigida para os Pontos Individuais de Escalação
-        for a in d.get('atletas', []):
-            is_cap = (a.get('atleta_id') == capitao_id)
-            
-            if tipo_dado == "OFICIAL":
-                pts_individual = float(a.get('pontos_num', 0.0))
-            else:
-                pts_individual = mapa_parciais.get(a.get('atleta_id'), 0.0)
-                if is_cap: pts_individual *= 1.5
+        # 2. Salva Escalação Individual
+        for a in escalacao_final:
+            pts_ind = a['pts']
+            if a['cap'] and tipo_dado == "PARCIAL": 
+                pts_ind *= 1.5 # Multiplica o do capitão para salvar na tabela caso seja parcial
 
             l_e.append({
                 'rodada': r_alvo, 
                 'liga_time_nome': t_obj['nome'], 
-                'atleta_apelido': a.get('apelido'), 
-                'atleta_posicao': pos_map.get(str(a.get('posicao_id')), 'Outro'),
-                'pontos': pts_individual, 
-                'is_capitao': is_cap,
+                'atleta_apelido': a['apelido'], 
+                'atleta_posicao': pos_map.get(str(a['pos']), 'Outro'),
+                'pontos': pts_ind, 
+                'is_capitao': a['cap'],
                 'timestamp': ts
             })
         time.sleep(0.1)
