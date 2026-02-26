@@ -29,6 +29,13 @@ def limpar_dados_rodada_e_futuro(client, rodada_alvo):
         query = f"DELETE FROM `{client.project}.{t}` WHERE rodada >= {rodada_alvo}" # nosec B608
         client.query(query).result()
 
+def buscar_parciais_globais(headers):
+    """Busca as pontuações ao vivo de todos os jogadores."""
+    try:
+        res = requests.get("https://api.cartola.globo.com/atletas/pontuados", headers=headers, timeout=30).json()
+        return {int(id_str): info.get('pontuacao', 0.0) for id_str, info in res.get('atletas', {}).items()}
+    except: return {}
+
 def rodar_coleta():
     client = get_bq_client()
     if not client: return
@@ -49,36 +56,59 @@ def rodar_coleta():
     l_h, l_e = [], []
     pos_map = {'1': 'Goleiro', '2': 'Lateral', '3': 'Zagueiro', '4': 'Meia', '5': 'Atacante', '6': 'Técnico'}
 
+    # 1. Pré-carrega as parciais se o mercado estiver fechado (jogos rolando)
+    mapa_parciais = {}
+    if tipo_dado == "PARCIAL":
+        mapa_parciais = buscar_parciais_globais(headers_pub)
+
     for t_obj in res_liga.get('times', []):
         tid = t_obj['time_id']
-        # Se OFICIAL, busca no histórico para recuperar escalação e ponto final
         url = f"https://api.cartola.globo.com/time/id/{tid}/{r_alvo}" if tipo_dado == "OFICIAL" else f"https://api.cartola.globo.com/time/id/{tid}"
         d = requests.get(url, headers=headers_pub, timeout=30).json()
         
-        # Pontos e Atletas
+        capitao_id = d.get('capitao_id')
+
+        # 2. Lógica corrigida para calcular Pontos da Equipe
+        pts_equipe = 0.0
         if tipo_dado == "OFICIAL":
-            pts = float(d.get('pontos', 0.0))
+            pts_equipe = float(d.get('pontos', 0.0))
         else:
-            pts = float(t_obj.get('pontos', {}).get('rodada', 0.0))
+            # Soma manual usando os dados ao vivo do endpoint de pontuados
+            for a in d.get('atletas', []):
+                atleta_id = a.get('atleta_id')
+                pts_atleta = mapa_parciais.get(atleta_id, 0.0)
+                if atleta_id == capitao_id:
+                    pts_atleta *= 1.5
+                pts_equipe += pts_atleta
+            pts_equipe = round(pts_equipe, 2)
             
         l_h.append({
             'nome': t_obj['nome'], 
             'nome_cartola': d.get('time', {}).get('nome_cartola', 'Sem Nome'),
-            'pontos': pts, 
+            'pontos': pts_equipe, 
             'patrimonio': float(d.get('patrimonio', 0.0)),
             'rodada': r_alvo, 
             'timestamp': ts, 
             'tipo_dado': tipo_dado
         })
         
+        # 3. Lógica corrigida para os Pontos Individuais de Escalação
         for a in d.get('atletas', []):
+            is_cap = (a.get('atleta_id') == capitao_id)
+            
+            if tipo_dado == "OFICIAL":
+                pts_individual = float(a.get('pontos_num', 0.0))
+            else:
+                pts_individual = mapa_parciais.get(a.get('atleta_id'), 0.0)
+                if is_cap: pts_individual *= 1.5
+
             l_e.append({
                 'rodada': r_alvo, 
                 'liga_time_nome': t_obj['nome'], 
                 'atleta_apelido': a.get('apelido'), 
                 'atleta_posicao': pos_map.get(str(a.get('posicao_id')), 'Outro'),
-                'pontos': float(a.get('pontos_num', 0.0)), 
-                'is_capitao': (a.get('atleta_id') == d.get('capitao_id')),
+                'pontos': pts_individual, 
+                'is_capitao': is_cap,
                 'timestamp': ts
             })
         time.sleep(0.1)
@@ -87,7 +117,7 @@ def rodar_coleta():
         limpar_dados_rodada_e_futuro(client, r_alvo)
         client.load_table_from_dataframe(pd.DataFrame(l_h), f"{client.project}.{TAB_HISTORICO}").result()
         client.load_table_from_dataframe(pd.DataFrame(l_e), f"{client.project}.{TAB_ESCALACOES}").result()
-        print(f"✅ Rodada {r_alvo} sincronizada!")
+        print(f"✅ Rodada {r_alvo} sincronizada com sucesso!")
 
 if __name__ == "__main__":
     rodar_coleta()
