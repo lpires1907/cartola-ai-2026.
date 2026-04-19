@@ -11,3 +11,8 @@ __pycache__/
 .streamlit/
 .venv/
 venv/
+streamlit_secret.toml
+debug_view.py
+check_view_logic.py
+analisar_calendario.py
+update_view_calendar.py

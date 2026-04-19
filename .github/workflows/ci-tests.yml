@@ -29,6 +29,11 @@ jobs:
         pip install -r requirements.txt
         pip install flake8 bandit
 
+    - name: 🏗️ Project Structure Audit
+      run: |
+        # Usamos o guardião local do projeto para validar a estrutura no CI
+        python scripts/project_guardian.py .
+
     - name: 🔍 Check Python Syntax (Compile)
       run: |
         python -m compileall .

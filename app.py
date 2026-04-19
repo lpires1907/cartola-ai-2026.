@@ -2,7 +2,12 @@ import streamlit as st
 import pandas as pd
 from google.cloud import bigquery
 import os
+import sys
 import json
+
+# Adiciona a pasta src ao path para localizar os módulos movidos
+sys.path.append(os.path.join(os.getcwd(), 'src'))
+
 from google.oauth2 import service_account
 from datetime import datetime
 import altair as alt
@@ -11,46 +16,47 @@ import altair as alt
 st.set_page_config(page_title="Liga SAS Brasil 2026", page_icon="⚽", layout="wide")
 
 def get_bq_client():
+    def fix_credentials(info):
+        if 'private_key' in info and isinstance(info['private_key'], str):
+            pk = info['private_key'].replace('\\n', '\n').replace('\\\\n', '\n').strip()
+            header = "-----BEGIN PRIVATE KEY-----"
+            footer = "-----END PRIVATE KEY-----"
+            if header in pk and footer in pk:
+                try:
+                    content = pk.split(header)[1].split(footer)[0].strip()
+                    content = "".join(content.split())
+                    import re
+                    content_fixed = "\n".join(re.findall(r'.{1,64}', content))
+                    pk = f"{header}\n{content_fixed}\n{footer}\n"
+                except Exception: pass
+            info['private_key'] = pk
+        return info
+
     creds, project_id = None, None
     # 1. Secrets (Cloud)
-    if "GCP_JSON_BASE64" in st.secrets:
-        try:
-            import base64
-            b64_val = st.secrets["GCP_JSON_BASE64"]
-            json_data = base64.b64decode(b64_val).decode('utf-8')
-            info = json.loads(json_data)
-            creds = service_account.Credentials.from_service_account_info(info)
-            project_id = info.get('project_id')
-        except Exception as e:
-            st.session_state["bq_auth_error"] = f"Erro ao decodificar Base64: {e}"
-    elif "GCP_SERVICE_ACCOUNT" in st.secrets:
+    if "GCP_SERVICE_ACCOUNT" in st.secrets:
         try:
             val = st.secrets["GCP_SERVICE_ACCOUNT"]
             info = dict(val) if not isinstance(val, str) else json.loads(val)
-            
-            # --- SUPER-REPARO DE CHAVE (Blindagem Máxima) ---
-            if 'private_key' in info and isinstance(info['private_key'], str):
-                pk = info['private_key']
-                # Remove qualquer tipo de escape de nova linha acumulado
-                pk = pk.replace('\\\\n', '\n').replace('\\n', '\n')
-                # Remove espaços em branco e quebras de linha nas extremidades
-                pk = pk.strip()
-                # Garante os headers corretos (caso tenham sido corrompidos)
-                if "-----BEGIN PRIVATE KEY-----" not in pk: pk = "-----BEGIN PRIVATE KEY-----\n" + pk
-                if "-----END PRIVATE KEY-----" not in pk: pk = pk + "\n-----END PRIVATE KEY-----"
-                info['private_key'] = pk
-                st.session_state["pk_len"] = len(pk)
-                st.session_state["pk_start"] = pk[:30]
-            # -----------------------------------------------
-
+            info = fix_credentials(info)
             creds = service_account.Credentials.from_service_account_info(info)
             project_id = info.get('project_id')
         except Exception as e:
             st.session_state["bq_auth_error"] = f"Erro ao processar Secret: {e}"
+    elif "GCP_JSON_BASE64" in st.secrets:
+        try:
+            import base64
+            b64_val = st.secrets["GCP_JSON_BASE64"]
+            json_data = base64.b64decode(b64_val).decode('utf-8')
+            info = fix_credentials(json.loads(json_data))
+            creds = service_account.Credentials.from_service_account_info(info)
+            project_id = info.get('project_id')
+        except Exception as e:
+            st.session_state["bq_auth_error"] = f"Erro ao decodificar Base64: {e}"
     # 2. Env Var (Local)
     elif os.getenv('GCP_SERVICE_ACCOUNT'):
         try:
-            info = json.loads(os.getenv('GCP_SERVICE_ACCOUNT'))
+            info = fix_credentials(json.loads(os.getenv('GCP_SERVICE_ACCOUNT')))
             creds = service_account.Credentials.from_service_account_info(info)
             project_id = info.get('project_id')
         except Exception as e:
@@ -73,19 +79,38 @@ client = get_bq_client()
 DATASET_ID = "cartola_analytics"
 
 # --- HELPERS ---
-def get_dados_temporais():
-    mes = datetime.now().month
-    mapa_mes = {
-        1: ("pontos_jan_fev", "Jan/Fev"), 2: ("pontos_jan_fev", "Jan/Fev"),
-        3: ("pontos_marco", "Março"), 4: ("pontos_abril", "Abril"),
-        5: ("pontos_maio", "Maio"), 6: ("pontos_jun_jul", "Jun/Jul"),
-        7: ("pontos_jun_jul", "Jun/Jul"), 8: ("pontos_agosto", "Agosto"),
-        9: ("pontos_setembro", "Setembro"), 10: ("pontos_outubro", "Outubro"),
-        11: ("pontos_nov_dez", "Nov/Dez"), 12: ("pontos_nov_dez", "Nov/Dez")
-    }
-    col_mes, nome_mes = mapa_mes.get(mes, ("pontos_jan_fev", "Início"))
-    col_turno = "pontos_turno_1" # Padrão T1
-    nome_turno = "1º Turno"
+def get_dados_temporais(df_view):
+    # Detecta a rodada máxima para definir o mês ativo
+    rodada_max = 0
+    if not df_view.empty and 'rodadas_jogadas' in df_view.columns:
+        # Usamos o máximo de rodadas jogadas como guia
+        rodada_max = df_view['rodadas_jogadas'].max()
+    
+    # Mapeamento de Rodada -> Mês (Baseado na NOVA REGRA)
+    if rodada_max <= 4:
+        col_mes, nome_mes = "pontos_jan_fev", "Jan/Fev"
+    elif rodada_max <= 9:
+        col_mes, nome_mes = "pontos_marco", "Março"
+    elif rodada_max <= 13:
+        col_mes, nome_mes = "pontos_abril", "Abril"
+    elif rodada_max <= 17:
+        col_mes, nome_mes = "pontos_maio", "Maio"
+    elif rodada_max <= 21:
+        col_mes, nome_mes = "pontos_junho", "Junho"
+    elif rodada_max <= 25:
+        col_mes, nome_mes = "pontos_julho", "Julho"
+    elif rodada_max <= 29:
+        col_mes, nome_mes = "pontos_agosto", "Agosto"
+    elif rodada_max <= 33:
+        col_mes, nome_mes = "pontos_setembro", "Setembro"
+    elif rodada_max <= 36:
+        col_mes, nome_mes = "pontos_outubro", "Outubro"
+    else:
+        col_mes, nome_mes = "pontos_nov_dez", "Nov/Dez"
+
+    col_turno = "pontos_turno_1" if rodada_max <= 19 else "pontos_turno_2"
+    nome_turno = "1º Turno" if rodada_max <= 19 else "2º Turno"
+    
     return col_mes, nome_mes, col_turno, nome_turno
 
 @st.cache_data(ttl=300)
@@ -128,9 +153,11 @@ with st.sidebar:
         except Exception as e:
             st.warning(f"⚠️ Erro ao contar linhas: {e}")
             if "pk_len" in st.session_state:
-                with st.expander("🛠️ Inspetor de Chave (Debug)", expanded=False):
+                with st.expander("🛠️ Inspetor de Chave (Debug)", expanded=True):
                     st.write(f"Tamanho: {st.session_state['pk_len']} caracteres")
-                    st.write(f"Início: `{st.session_state['pk_start']}...`")
+                    st.code(f"Início: {st.session_state['pk_start']}")
+                    st.code(f"Fim: {st.session_state['pk_end']}")
+                    st.info("💡 Se o erro persistir, use a secret `GCP_JSON_BASE64` (mais robusta).")
     else:
         st.error("❌ BigQuery: sem conexão")
         auth_err = st.session_state.get("bq_auth_error")
@@ -151,8 +178,12 @@ with tab1:
     if client:
         # 1. NARRADOR RODADA (Topo)
         df_narrador = load_data(f"SELECT texto, tipo FROM `{client.project}.{DATASET_ID}.comentarios_ia` ORDER BY data DESC LIMIT 5") # nosec B608
-        narr_rodada = df_narrador[df_narrador['tipo'] == 'RODADA'].head(1) if not df_narrador.empty and 'tipo' in df_narrador.columns else pd.DataFrame()
-        narr_geral = df_narrador[df_narrador['tipo'] == 'GERAL'].head(1) if not df_narrador.empty and 'tipo' in df_narrador.columns else pd.DataFrame()
+        if not df_narrador.empty and 'tipo' in df_narrador.columns:
+            df_narrador['tipo'] = df_narrador['tipo'].str.upper()
+            narr_rodada = df_narrador[df_narrador['tipo'] == 'RODADA'].head(1)
+            narr_geral = df_narrador[df_narrador['tipo'] == 'GERAL'].head(1)
+        else:
+            narr_rodada, narr_geral = pd.DataFrame(), pd.DataFrame()
 
         if not narr_rodada.empty:
             st.info(f"🎙️ **Rodada:** {narr_rodada.iloc[0]['texto']}")
@@ -170,7 +201,7 @@ with tab1:
         df_rodada = load_data(q_last)
 
         if not df_view.empty and not df_rodada.empty:
-            col_mes, nome_mes, col_turno, nome_turno = get_dados_temporais()
+            col_mes, nome_mes, col_turno, nome_turno = get_dados_temporais(df_view)
             
             # ORDENAÇÕES
             top_geral = df_view.sort_values('total_geral', ascending=False)
@@ -181,8 +212,9 @@ with tab1:
             mitada = df_view.sort_values('maior_pontuacao', ascending=False).iloc[0]
             df_zica = df_view[df_view['menor_pontuacao'] > 0.1].sort_values('menor_pontuacao', ascending=True)
             zicada = df_zica.iloc[0] if not df_zica.empty else df_view.iloc[0]
-            # patrimonio column name can vary between schema versions
-            col_patrimonio = 'patrimonio_atual' if 'patrimonio_atual' in df_view.columns else ('patrimonio_medio' if 'patrimonio_medio' in df_view.columns else None)
+            # patrimônio column name can vary between schema versions
+            possiveis_cols = ['patrimonio_atual', 'patrimonio_medio', 'patrimonio']
+            col_patrimonio = next((c for c in possiveis_cols if c in df_view.columns), None)
             rico = df_view.sort_values(col_patrimonio, ascending=False).iloc[0] if col_patrimonio else None
 
             # --- LINHA 1: LIDERANÇAS ---
@@ -271,6 +303,10 @@ with tab1:
                 # Filtra colunas existentes
                 cols_v = [c for c in cols_r if c in df_view.columns]
                 ren = {'total_geral': 'Total', col_turno: nome_turno, col_mes: nome_mes, 'media': 'Média', 'maior_pontuacao': 'Recorde'}
+                # Tratamento especial para nomes de meses novos na View
+                for m_col in ['pontos_junho', 'pontos_julho']:
+                    if m_col in df_view.columns and m_col not in ren:
+                        ren[m_col] = m_col.replace('pontos_', '').capitalize()
                 if col_patrimonio:
                     ren[col_patrimonio] = 'C$'
                 st.dataframe(df_view[cols_v].rename(columns=ren).style.format(precision=2), use_container_width=True)

@@ -26,6 +26,12 @@ jobs:
           # Alterado para ler do arquivo, garantindo que google-genai e matplotlib sejam instalados
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           
+      - name: 🏥 Health Check (Sanity)
+        env:
+          GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+          CARTOLA_GLBID: ${{ secrets.CARTOLA_GLBID }}
+        run: python src/health_check.py
+
       - name: 🚀 Executar Maestro
         env:
           # Segredos existentes
@@ -34,6 +40,5 @@ jobs:
           GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          # Segredo NOVO para a Copa (Perfeito!)
           CARTOLA_GLBID: ${{ secrets.CARTOLA_GLBID }}
         run: python main.py
