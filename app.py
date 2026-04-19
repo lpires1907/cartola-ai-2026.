@@ -55,16 +55,32 @@ def get_dados_temporais():
 
 @st.cache_data(ttl=300)
 def load_data(query):
-    if not client: return pd.DataFrame()
+    if not client:
+        return pd.DataFrame()
     try:
         df = client.query(query).to_dataframe()
-        # BLINDAGEM DE TIPOS: Converte tudo para float para evitar erro de subtração
         cols_num = ['total_geral', 'pontos', 'media', 'maior_pontuacao', 'menor_pontuacao', 'patrimonio_atual']
         for col in df.columns:
             if col in cols_num or col.startswith('pontos_'):
                 df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
         return df
-    except: return pd.DataFrame()
+    except Exception as e:
+        # Surface error visibly so it appears in Streamlit logs and sidebar
+        print(f"[BQ ERROR] {e}")
+        st.session_state["last_bq_error"] = str(e)
+        return pd.DataFrame()
+
+# --- DIAGNÓSTICO (Sidebar) ---
+with st.sidebar:
+    st.markdown("### 🔧 Diagnóstico")
+    if client:
+        st.success(f"✅ BQ conectado: `{client.project}`")
+    else:
+        st.error("❌ BigQuery: sem credenciais\n\nVerifique o secret `GCP_SERVICE_ACCOUNT` no Streamlit Cloud.")
+    err = st.session_state.get("last_bq_error")
+    if err:
+        with st.expander("⚠️ Último erro BQ", expanded=True):
+            st.code(err)
 
 # --- INTERFACE ---
 st.title("🏆 Liga SAS Brasil 2026")
