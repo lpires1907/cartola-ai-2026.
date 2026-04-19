@@ -16,7 +16,8 @@ DATASET_ID = "cartola_analytics"
 TAB_HISTORICO = f"{DATASET_ID}.historico"
 TAB_ESCALACOES = f"{DATASET_ID}.times_escalacoes"
 GCP_JSON = os.getenv('GCP_SERVICE_ACCOUNT')
-TOKEN_SECRET = os.getenv('CARTOLA_GLBID') 
+# Tenta pegar o token de qualquer uma das variáveis comuns
+TOKEN_SECRET = os.getenv('CARTOLA_GLBID') or os.getenv('CARTOLA_BEARER_TOKEN')
 
 def get_bq_client():
     if not GCP_JSON: return None

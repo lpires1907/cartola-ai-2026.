@@ -39,7 +39,7 @@ def get_bq_client():
     return bigquery.Client()
 
 def get_token():
-    return os.getenv("CARTOLA_GLBID")
+    return os.getenv("CARTOLA_GLBID") or os.getenv("CARTOLA_BEARER_TOKEN")
 
 def carregar_configuracao():
     if not os.path.exists(ARQUIVO_CONFIG): return []
