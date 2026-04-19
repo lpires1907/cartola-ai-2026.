@@ -15,9 +15,16 @@ def get_bq_client():
     # 1. Secrets (Cloud)
     if "GCP_SERVICE_ACCOUNT" in st.secrets:
         try:
-            val = st.secrets["GCP_SERVICE_ACCOUNT"]
-            # Converte de AttrDict (Streamlit) para dict real se necessário
             info = dict(val) if not isinstance(val, str) else json.loads(val)
+            
+            # --- AUTOCORREÇÃO DE CHAVE (Blindagem contra Invalid JWT Signature) ---
+            if 'private_key' in info and isinstance(info['private_key'], str):
+                # Remove escapes duplos e garante que \n sejam quebras de linha reais
+                fixed_key = info['private_key'].replace('\\\\n', '\n').replace('\\n', '\n')
+                # Garante que as bordas da chave estejam limpas
+                info['private_key'] = fixed_key.strip()
+            # ----------------------------------------------------------------------
+
             creds = service_account.Credentials.from_service_account_info(info)
             project_id = info.get('project_id')
         except Exception as e:
