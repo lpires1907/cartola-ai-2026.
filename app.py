@@ -13,7 +13,17 @@ st.set_page_config(page_title="Liga SAS Brasil 2026", page_icon="⚽", layout="w
 def get_bq_client():
     creds, project_id = None, None
     # 1. Secrets (Cloud)
-    if "GCP_SERVICE_ACCOUNT" in st.secrets:
+    if "GCP_JSON_BASE64" in st.secrets:
+        try:
+            import base64
+            b64_val = st.secrets["GCP_JSON_BASE64"]
+            json_data = base64.b64decode(b64_val).decode('utf-8')
+            info = json.loads(json_data)
+            creds = service_account.Credentials.from_service_account_info(info)
+            project_id = info.get('project_id')
+        except Exception as e:
+            st.session_state["bq_auth_error"] = f"Erro ao decodificar Base64: {e}"
+    elif "GCP_SERVICE_ACCOUNT" in st.secrets:
         try:
             val = st.secrets["GCP_SERVICE_ACCOUNT"]
             info = dict(val) if not isinstance(val, str) else json.loads(val)
