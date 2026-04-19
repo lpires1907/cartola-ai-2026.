@@ -100,8 +100,8 @@ with st.sidebar:
             count_e = client.query(f"SELECT COUNT(*) as c FROM `{client.project}.{DATASET_ID}.times_escalacoes`").to_dataframe().iloc[0]['c']  # nosec
             st.metric("Linhas em Historico", count_h)
             st.metric("Linhas em Escalacoes", count_e)
-        except:
-            st.warning("⚠️ Não foi possível contar as linhas.")
+        except Exception as e:
+            st.warning(f"⚠️ Erro ao contar linhas: {e}")
     else:
         st.error("❌ BigQuery: sem conexão")
         auth_err = st.session_state.get("bq_auth_error")
