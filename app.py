@@ -74,8 +74,8 @@ with tab1:
     if client:
         # 1. NARRADOR RODADA (Topo)
         df_narrador = load_data(f"SELECT texto, tipo FROM `{client.project}.{DATASET_ID}.comentarios_ia` ORDER BY data DESC LIMIT 5") # nosec B608
-        narr_rodada = df_narrador[df_narrador['tipo'] == 'RODADA'].head(1)
-        narr_geral = df_narrador[df_narrador['tipo'] == 'GERAL'].head(1)
+        narr_rodada = df_narrador[df_narrador['tipo'] == 'RODADA'].head(1) if not df_narrador.empty and 'tipo' in df_narrador.columns else pd.DataFrame()
+        narr_geral = df_narrador[df_narrador['tipo'] == 'GERAL'].head(1) if not df_narrador.empty and 'tipo' in df_narrador.columns else pd.DataFrame()
 
         if not narr_rodada.empty:
             st.info(f"🎙️ **Rodada:** {narr_rodada.iloc[0]['texto']}")
@@ -104,7 +104,9 @@ with tab1:
             mitada = df_view.sort_values('maior_pontuacao', ascending=False).iloc[0]
             df_zica = df_view[df_view['menor_pontuacao'] > 0.1].sort_values('menor_pontuacao', ascending=True)
             zicada = df_zica.iloc[0] if not df_zica.empty else df_view.iloc[0]
-            rico = df_view.sort_values('patrimonio_atual', ascending=False).iloc[0]
+            # patrimonio column name can vary between schema versions
+            col_patrimonio = 'patrimonio_atual' if 'patrimonio_atual' in df_view.columns else ('patrimonio_medio' if 'patrimonio_medio' in df_view.columns else None)
+            rico = df_view.sort_values(col_patrimonio, ascending=False).iloc[0] if col_patrimonio else None
 
             # --- LINHA 1: LIDERANÇAS ---
             c1, c2, c3 = st.columns(3)
@@ -158,7 +160,10 @@ with tab1:
 
             k2.metric("🚀 Maior Mitada", mitada['nome'], f"{mitada['maior_pontuacao']:.2f}")
             k3.metric("📉 Maior Zicada", zicada['nome'], f"{zicada['menor_pontuacao']:.2f}")
-            k4.metric("💰 O Mais Rico", rico['nome'], f"C$ {rico['patrimonio_atual']:.2f}")
+            if rico is not None and col_patrimonio:
+                k4.metric("💰 O Mais Rico", rico['nome'], f"C$ {rico[col_patrimonio]:.2f}")
+            else:
+                k4.info("Patrimônio indisponível.")
 
             # NARRADOR GERAL (Embaixo)
             if not narr_geral.empty:
@@ -183,10 +188,14 @@ with tab1:
 
             # --- TABELA GERAL ---
             with st.expander("📊 Tabela Completa (Expandir)", expanded=True):
-                cols_r = ['nome', 'nome_cartola', 'total_geral', col_turno, col_mes, 'media', 'maior_pontuacao', 'patrimonio_atual']
+                cols_r = ['nome', 'nome_cartola', 'total_geral', col_turno, col_mes, 'media', 'maior_pontuacao']
+                if col_patrimonio:
+                    cols_r.append(col_patrimonio)
                 # Filtra colunas existentes
                 cols_v = [c for c in cols_r if c in df_view.columns]
-                ren = {'total_geral': 'Total', col_turno: nome_turno, col_mes: nome_mes, 'media': 'Média', 'maior_pontuacao': 'Recorde', 'patrimonio_atual': 'C$'}
+                ren = {'total_geral': 'Total', col_turno: nome_turno, col_mes: nome_mes, 'media': 'Média', 'maior_pontuacao': 'Recorde'}
+                if col_patrimonio:
+                    ren[col_patrimonio] = 'C$'
                 st.dataframe(df_view[cols_v].rename(columns=ren).style.format(precision=2), use_container_width=True)
         else:
             st.warning("Aguardando dados... Rode o coletor.")
@@ -221,9 +230,9 @@ with tab3:
             FROM `{client.project}.{DATASET_ID}.times_escalacoes` WHERE rodada = {rodada}
             """ # nosec B608
             df_e = load_data(q_esc)
-            times = st.multiselect("Time:", df_e['liga_time_nome'].unique())
+            times = st.multiselect("Time:", df_e['liga_time_nome'].unique() if not df_e.empty else [])
             if times:
-                st.dataframe(df_e[df_e['liga_time_nome'].isin(times)].style.format({'pontos': '{:.2f}'}).applymap(
+                st.dataframe(df_e[df_e['liga_time_nome'].isin(times)].style.format({'pontos': '{:.2f}'}).map(
                     lambda x: 'color:blue;font-weight:bold' if x is True else '', subset=['is_capitao']
                 ), use_container_width=True)
         else: st.warning("Sem dados.")
