@@ -12,26 +12,36 @@ st.set_page_config(page_title="Liga SAS Brasil 2026", page_icon="⚽", layout="w
 
 def get_bq_client():
     creds, project_id = None, None
-    # 1. Secrets (Cloud) - Tenta formato JSON string ou Dict TOML
+    # 1. Secrets (Cloud)
     if "GCP_SERVICE_ACCOUNT" in st.secrets:
         try:
             val = st.secrets["GCP_SERVICE_ACCOUNT"]
-            info = json.loads(val) if isinstance(val, str) else dict(val)
+            # Converte de AttrDict (Streamlit) para dict real se necessário
+            info = dict(val) if not isinstance(val, str) else json.loads(val)
             creds = service_account.Credentials.from_service_account_info(info)
-            project_id = info['project_id']
-        except: pass
+            project_id = info.get('project_id')
+        except Exception as e:
+            st.session_state["bq_auth_error"] = f"Erro ao processar Secret: {e}"
     # 2. Env Var (Local)
     elif os.getenv('GCP_SERVICE_ACCOUNT'):
         try:
             info = json.loads(os.getenv('GCP_SERVICE_ACCOUNT'))
             creds = service_account.Credentials.from_service_account_info(info)
-            project_id = info['project_id']
-        except: pass
+            project_id = info.get('project_id')
+        except Exception as e:
+            st.session_state["bq_auth_error"] = f"Erro ao processar .env: {e}"
     # 3. Arquivo
     elif os.path.exists("credentials.json"):
-        return bigquery.Client.from_service_account_json("credentials.json")
+        try:
+            return bigquery.Client.from_service_account_json("credentials.json")
+        except Exception as e:
+            st.session_state["bq_auth_error"] = f"Erro ao processar credentials.json: {e}"
     
-    if creds and project_id: return bigquery.Client(credentials=creds, project=project_id)
+    if creds and project_id: 
+        try:
+            return bigquery.Client(credentials=creds, project=project_id)
+        except Exception as e:
+            st.session_state["bq_auth_error"] = f"Erro ao criar cliente BigQuery: {e}"
     return None
 
 client = get_bq_client()
@@ -73,13 +83,27 @@ def load_data(query):
 # --- DIAGNÓSTICO (Sidebar) ---
 with st.sidebar:
     st.markdown("### 🔧 Diagnóstico")
+    
+    # Detector de Secrets
+    keys = list(st.secrets.keys())
+    if "GCP_SERVICE_ACCOUNT" in keys:
+        st.success("✅ Secret `GCP_SERVICE_ACCOUNT` detectado")
+    else:
+        st.error("❌ Secret `GCP_SERVICE_ACCOUNT` NÃO encontrado")
+        st.write(f"Chaves disponíveis: `{keys}`")
+
     if client:
         st.success(f"✅ BQ conectado: `{client.project}`")
     else:
-        st.error("❌ BigQuery: sem credenciais\n\nVerifique o secret `GCP_SERVICE_ACCOUNT` no Streamlit Cloud.")
+        st.error("❌ BigQuery: sem conexão")
+        auth_err = st.session_state.get("bq_auth_error")
+        if auth_err:
+            with st.expander("🔍 Detalhes do erro de Auth", expanded=True):
+                st.write(auth_err)
+    
     err = st.session_state.get("last_bq_error")
     if err:
-        with st.expander("⚠️ Último erro BQ", expanded=True):
+        with st.expander("⚠️ Último erro de Query", expanded=True):
             st.code(err)
 
 # --- INTERFACE ---
