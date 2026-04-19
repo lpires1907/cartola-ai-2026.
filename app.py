@@ -18,13 +18,20 @@ def get_bq_client():
             val = st.secrets["GCP_SERVICE_ACCOUNT"]
             info = dict(val) if not isinstance(val, str) else json.loads(val)
             
-            # --- AUTOCORREÇÃO DE CHAVE (Blindagem contra Invalid JWT Signature) ---
+            # --- SUPER-REPARO DE CHAVE (Blindagem Máxima) ---
             if 'private_key' in info and isinstance(info['private_key'], str):
-                # Remove escapes duplos e garante que \n sejam quebras de linha reais
-                fixed_key = info['private_key'].replace('\\\\n', '\n').replace('\\n', '\n')
-                # Garante que as bordas da chave estejam limpas
-                info['private_key'] = fixed_key.strip()
-            # ----------------------------------------------------------------------
+                pk = info['private_key']
+                # Remove qualquer tipo de escape de nova linha acumulado
+                pk = pk.replace('\\\\n', '\n').replace('\\n', '\n')
+                # Remove espaços em branco e quebras de linha nas extremidades
+                pk = pk.strip()
+                # Garante os headers corretos (caso tenham sido corrompidos)
+                if "-----BEGIN PRIVATE KEY-----" not in pk: pk = "-----BEGIN PRIVATE KEY-----\n" + pk
+                if "-----END PRIVATE KEY-----" not in pk: pk = pk + "\n-----END PRIVATE KEY-----"
+                info['private_key'] = pk
+                st.session_state["pk_len"] = len(pk)
+                st.session_state["pk_start"] = pk[:30]
+            # -----------------------------------------------
 
             creds = service_account.Credentials.from_service_account_info(info)
             project_id = info.get('project_id')
@@ -110,6 +117,10 @@ with st.sidebar:
             st.metric("Linhas em Escalacoes", count_e)
         except Exception as e:
             st.warning(f"⚠️ Erro ao contar linhas: {e}")
+            if "pk_len" in st.session_state:
+                with st.expander("🛠️ Inspetor de Chave (Debug)", expanded=False):
+                    st.write(f"Tamanho: {st.session_state['pk_len']} caracteres")
+                    st.write(f"Início: `{st.session_state['pk_start']}...`")
     else:
         st.error("❌ BigQuery: sem conexão")
         auth_err = st.session_state.get("bq_auth_error")
