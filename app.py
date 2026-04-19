@@ -15,6 +15,7 @@ def get_bq_client():
     # 1. Secrets (Cloud)
     if "GCP_SERVICE_ACCOUNT" in st.secrets:
         try:
+            val = st.secrets["GCP_SERVICE_ACCOUNT"]
             info = dict(val) if not isinstance(val, str) else json.loads(val)
             
             # --- AUTOCORREÇÃO DE CHAVE (Blindagem contra Invalid JWT Signature) ---
