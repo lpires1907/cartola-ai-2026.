@@ -80,11 +80,13 @@ DATASET_ID = "cartola_analytics"
 
 # --- HELPERS ---
 def get_dados_temporais(df_view):
-    # Detecta a rodada máxima para definir o mês ativo
+    # Detecta a rodada real (máxima) para definir o mês ativo
     rodada_max = 0
-    if not df_view.empty and 'rodadas_jogadas' in df_view.columns:
-        # Usamos o máximo de rodadas jogadas como guia
-        rodada_max = df_view['rodadas_jogadas'].max()
+    if not df_view.empty:
+        if 'ultima_rodada' in df_view.columns:
+            rodada_max = df_view['ultima_rodada'].max()
+        elif 'rodadas_jogadas' in df_view.columns:
+            rodada_max = df_view['rodadas_jogadas'].max()
     
     # Mapeamento de Rodada -> Mês (Baseado na NOVA REGRA)
     if rodada_max <= 4:
@@ -300,8 +302,9 @@ with tab1:
                 cols_r = ['nome', 'nome_cartola', 'total_geral', col_turno, col_mes, 'media', 'maior_pontuacao']
                 if col_patrimonio:
                     cols_r.append(col_patrimonio)
-                # Filtra colunas existentes
-                cols_v = [c for c in cols_r if c in df_view.columns]
+                # Filtra colunas existentes e úteis
+                cols_r = ['nome', 'nome_cartola', 'total_geral', col_turno, col_mes, 'media', 'maior_pontuacao', 'rodadas_jogadas', col_patrimonio]
+                cols_v = [c for c in cols_r if c and c in df_view.columns]
                 ren = {'total_geral': 'Total', col_turno: nome_turno, col_mes: nome_mes, 'media': 'Média', 'maior_pontuacao': 'Recorde'}
                 # Tratamento especial para nomes de meses novos na View
                 for m_col in ['pontos_junho', 'pontos_julho']:
