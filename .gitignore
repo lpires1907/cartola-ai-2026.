@@ -1,8 +1,10 @@
 secrets.json
+credentials.json
 key
 key.pub
 *.pem
 *.p8
+*.json.key
 .env
 __pycache__/
 *.pyc
